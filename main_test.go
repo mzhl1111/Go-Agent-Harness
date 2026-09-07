@@ -83,3 +83,32 @@ func TestApprovalRequestSkipsExecutorAndPreservesCallIdentity(t *testing.T) {
 		t.Fatalf("unexpected approval outcome: %#v", outcome)
 	}
 }
+
+func TestApprovedCallResumesWithoutReplayingTheOriginalResponse(t *testing.T) {
+	executor := &countingExecutor{}
+	model := &ScriptedModel{}
+	session := &Session{
+		model: model,
+		tools: &ToolRegistry{
+			executors: map[string]ToolExecutor{"exec_command": executor},
+			pre: []PreHook{func(call ToolCall) PreHookOutcome {
+				if call.ID == "call_2" {
+					return PreHookOutcome{Decision: PreHookNeedsApproval, Reason: "needs approval"}
+				}
+				return PreHookOutcome{Decision: PreHookContinue}
+			}},
+		},
+	}
+	turn := session.runTurn(context.Background())
+	if model.responseNumber != 1 || len(turn.pendingApprovals) != 1 || executor.calls != 1 {
+		t.Fatalf("turn did not suspend as expected: responses=%d approvals=%d calls=%d", model.responseNumber, len(turn.pendingApprovals), executor.calls)
+	}
+
+	turn = session.resumeApproved(context.Background(), turn, "call_2")
+	if model.responseNumber != 2 || len(turn.pendingApprovals) != 0 || executor.calls != 2 {
+		t.Fatalf("resume replayed or did not execute: responses=%d approvals=%d calls=%d", model.responseNumber, len(turn.pendingApprovals), executor.calls)
+	}
+	if got, want := len(turn.toolResults), 2; got != want {
+		t.Fatalf("tool result count = %d, want %d", got, want)
+	}
+}

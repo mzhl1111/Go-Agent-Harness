@@ -24,7 +24,13 @@
 - [x] Represent an approval request as a terminal dispatch outcome.
 - [x] Ensure an approval request skips the executor and post-hook.
 - [x] Retain pending approval details in turn context with the original call ID.
-- [ ] Resume an approved tool call without replaying the whole model response.
+- [x] Resume an approved tool call without replaying the whole model response.
+
+## Next milestone: 4 — context and bounded outputs
+
+- [ ] Make the model's input an explicit, inspectable turn-history value.
+- [ ] Serialize tool results and approval states into that history.
+- [ ] Add a hard cap to tool output inserted into context.
 
 ## Ground rules
 

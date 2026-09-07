@@ -82,12 +82,15 @@ type ToolRegistry struct {
 	post      []PostHook
 }
 
-func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall) ToolDispatchOutcome {
+func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall, approvalGranted bool) ToolDispatchOutcome {
 	for _, hook := range r.pre {
 		switch outcome := hook(call); outcome.Decision {
 		case PreHookBlocked:
 			return ToolDispatchOutcome{Result: &ToolResult{CallID: call.ID, IsError: true, Output: outcome.Reason}}
 		case PreHookNeedsApproval:
+			if approvalGranted {
+				continue
+			}
 			return ToolDispatchOutcome{Approval: &ApprovalRequest{
 				CallID: call.ID, Tool: call.Name, Input: call.Input, Reason: outcome.Reason,
 			}}
@@ -108,15 +111,22 @@ func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call 
 
 func (r *ToolRegistry) Start(ctx context.Context, call ToolCall) ToolFuture {
 	result := make(chan ToolDispatchOutcome, 1)
-	go func() { result <- r.dispatchAnyWithTerminalOutcome(ctx, call) }()
+	go func() { result <- r.dispatchAnyWithTerminalOutcome(ctx, call, false) }()
+	return ToolFuture{call: call, result: result}
+}
+
+func (r *ToolRegistry) StartAfterApproval(ctx context.Context, call ToolCall) ToolFuture {
+	result := make(chan ToolDispatchOutcome, 1)
+	go func() { result <- r.dispatchAnyWithTerminalOutcome(ctx, call, true) }()
 	return ToolFuture{call: call, result: result}
 }
 
 type TurnContext struct {
-	toolResults      []ToolResult
-	pendingApprovals []ApprovalRequest
-	needsFollowUp    bool
-	followUpReason   string
+	toolResults              []ToolResult
+	pendingApprovals         []ApprovalRequest
+	lastResponseHadToolCalls bool
+	needsFollowUp            bool
+	followUpReason           string
 }
 
 type StopHook func(*TurnContext)
@@ -137,7 +147,7 @@ func (m *ScriptedModel) Next(_ *TurnContext) []ResponseItem {
 			{Kind: "tool_call", Tool: "exec_command", Input: "echo gated", CallID: "call_2"},
 		}
 	}
-	return []ResponseItem{{Kind: "text", Text: "call_1 completed; call_2 is waiting for approval."}}
+	return []ResponseItem{{Kind: "text", Text: "The approved tool completed; this turn is complete."}}
 }
 
 type Session struct {
@@ -157,7 +167,10 @@ func (s *Session) handleOutputItemDone(ctx context.Context, item ResponseItem) *
 }
 
 func (s *Session) runTurn(ctx context.Context) *TurnContext {
-	turn := &TurnContext{}
+	return s.continueTurn(ctx, &TurnContext{})
+}
+
+func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
 		var toolFutures []*ToolFuture
 		for _, item := range s.model.Next(turn) {
@@ -165,6 +178,7 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 				toolFutures = append(toolFutures, future)
 			}
 		}
+		turn.lastResponseHadToolCalls = len(toolFutures) > 0
 		// Every call is already running. Await in model-item order so the next
 		// response receives deterministic, CallID-associated tool outputs.
 		for _, future := range toolFutures {
@@ -180,6 +194,9 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 		for _, hook := range s.stopHooks {
 			hook(turn)
 		}
+		if len(turn.pendingApprovals) > 0 {
+			return turn // The UI can now render approval requests and wait for a user decision.
+		}
 		if turn.needsFollowUp {
 			fmt.Println("stop hook requested follow-up:", turn.followUpReason)
 			turn.needsFollowUp = false
@@ -187,6 +204,26 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 		}
 		return turn
 	}
+}
+
+// resumeApproved runs precisely one previously suspended call, then asks the
+// model for its next response with the same turn context. It never replays the
+// model response that originally created the approval request.
+func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID string) *TurnContext {
+	for index, request := range turn.pendingApprovals {
+		if request.CallID != callID {
+			continue
+		}
+		call := ToolCall{Name: request.Tool, Input: request.Input, ID: request.CallID}
+		outcome := <-s.tools.StartAfterApproval(ctx, call).result
+		turn.pendingApprovals = append(turn.pendingApprovals[:index], turn.pendingApprovals[index+1:]...)
+		if outcome.Result != nil {
+			turn.toolResults = append(turn.toolResults, *outcome.Result)
+			fmt.Printf("approved tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
+		}
+		return s.continueTurn(ctx, turn)
+	}
+	return turn
 }
 
 func main() {
@@ -206,10 +243,13 @@ func main() {
 			// A stop hook sees all accumulated turn state on every loop pass.
 			// Marking its decision prevents the same result from requesting an
 			// unbounded series of follow-up responses.
-			if len(t.toolResults)+len(t.pendingApprovals) == 2 && t.followUpReason == "" {
+			if t.lastResponseHadToolCalls && len(t.toolResults) == 2 && len(t.pendingApprovals) == 0 && t.followUpReason == "" {
 				t.needsFollowUp, t.followUpReason = true, "send tool result back to model"
 			}
 		}},
 	}
-	session.runTurn(context.Background())
+	turn := session.runTurn(context.Background())
+	if len(turn.pendingApprovals) > 0 {
+		session.resumeApproved(context.Background(), turn, turn.pendingApprovals[0].CallID)
+	}
 }
