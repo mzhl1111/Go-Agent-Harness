@@ -72,7 +72,7 @@ func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 
 type oneResponseModel struct{ items []ResponseItem }
 
-func (m oneResponseModel) Stream(ctx context.Context, _ []HistoryItem) <-chan ModelEvent {
+func (m oneResponseModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
 	events := make([]ModelEvent, 0, len(m.items))
 	for _, item := range m.items {
 		events = append(events, ModelEvent{Kind: ModelOutputItemDone, Item: item})
@@ -85,7 +85,7 @@ type historyRecordingModel struct {
 	responseNumber int
 }
 
-func (m *historyRecordingModel) Stream(ctx context.Context, input []HistoryItem) <-chan ModelEvent {
+func (m *historyRecordingModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
 	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
 	m.responseNumber++
 	if m.responseNumber == 1 {
@@ -95,6 +95,24 @@ func (m *historyRecordingModel) Stream(ctx context.Context, input []HistoryItem)
 		)
 	}
 	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "done"}})
+}
+
+type flakyStreamModel struct {
+	attempts          int
+	failAfterToolCall bool
+}
+
+func (m *flakyStreamModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	m.attempts++
+	if m.attempts == 1 {
+		if m.failAfterToolCall {
+			return modelEventStreamWithFailure(ctx, &StreamFailure{Message: "connection lost", Retryable: true},
+				ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "count", CallID: "call_once"}},
+			)
+		}
+		return modelEventStreamWithFailure(ctx, &StreamFailure{Message: "connection lost", Retryable: true})
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "reconnected"}})
 }
 
 func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
@@ -291,5 +309,34 @@ func TestDispatchObserverReceivesRetryLifecycle(t *testing.T) {
 	}
 	if events[1].Attempt != 1 || events[2].Attempt != 2 || events[2].CallID != "call_observed" {
 		t.Fatalf("unexpected event details: %#v", events)
+	}
+}
+
+func TestSessionRetriesRetryableStreamBeforeAnyCompletedItem(t *testing.T) {
+	model := &flakyStreamModel{}
+	session := &Session{model: model, streamRetry: RetryPolicy{MaxAttempts: 2}}
+	turn := session.runTurn(context.Background())
+	if model.attempts != 2 || turn.streamFailure != nil {
+		t.Fatalf("stream was not retried successfully: attempts=%d failure=%#v", model.attempts, turn.streamFailure)
+	}
+	if got, want := len(turn.history), 2; got != want { // user input + final assistant item
+		t.Fatalf("history count = %d, want %d", got, want)
+	}
+}
+
+func TestSessionDoesNotRetryStreamAfterCompletedToolItem(t *testing.T) {
+	model := &flakyStreamModel{failAfterToolCall: true}
+	executor := &countingExecutor{}
+	session := &Session{
+		model:       model,
+		streamRetry: RetryPolicy{MaxAttempts: 2},
+		tools:       &ToolRegistry{executors: map[string]ToolExecutor{"count": executor}},
+	}
+	turn := session.runTurn(context.Background())
+	if model.attempts != 1 || executor.calls != 1 {
+		t.Fatalf("completed stream item was replayed: attempts=%d executor calls=%d", model.attempts, executor.calls)
+	}
+	if turn.streamFailure == nil || turn.streamFailure.Message != "connection lost" {
+		t.Fatalf("stream failure was not retained: %#v", turn.streamFailure)
 	}
 }

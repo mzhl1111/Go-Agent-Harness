@@ -19,7 +19,7 @@ The program intentionally supports only `echo ...`, making each run deterministi
 3. Approvals and terminal outcomes. *(implemented, including exact-call resume)*
 4. Context/history construction and bounded tool outputs. *(implemented)*
 5. Cancellation, retries and observability. *(implemented)*
-6. Streaming model output. *(event contract implemented; transport retries next)*
+6. Streaming model output. *(implemented, including safe pre-item transport retries)*
 
 See [the tracking checklist](docs/TRACKING.md) for the current state.
 

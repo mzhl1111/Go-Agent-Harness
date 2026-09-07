@@ -6,7 +6,7 @@ import "context"
 // one response; tool results accumulated in TurnContext are its next context.
 type ScriptedModel struct{ responseNumber int }
 
-func (m *ScriptedModel) Stream(ctx context.Context, _ []HistoryItem) <-chan ModelEvent {
+func (m *ScriptedModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
 	m.responseNumber++
 	if m.responseNumber == 1 {
 		return modelEventStream(ctx,

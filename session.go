@@ -15,6 +15,7 @@ type TurnContext struct {
 	lastResponseHadToolCalls bool
 	needsFollowUp            bool
 	followUpReason           string
+	streamFailure            *StreamFailure
 }
 
 type StopHook func(*TurnContext)
@@ -25,6 +26,7 @@ type Session struct {
 	stopHooks    []StopHook
 	initialInput string
 	toolTimeout  time.Duration
+	streamRetry  RetryPolicy
 	onTextDelta  func(string)
 }
 
@@ -47,20 +49,7 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
-		var toolFutures []*ToolFuture
-		for event := range s.model.Stream(ctx, turn.modelInput()) {
-			if event.Kind == ModelTextDelta {
-				if s.onTextDelta != nil {
-					s.onTextDelta(event.Delta)
-				}
-				continue
-			}
-			if event.Kind == ModelOutputItemDone {
-				if future := s.handleOutputItemDone(ctx, turn, event.Item); future != nil {
-					toolFutures = append(toolFutures, future)
-				}
-			}
-		}
+		toolFutures, streamFailure := s.streamResponse(ctx, turn)
 		turn.lastResponseHadToolCalls = len(toolFutures) > 0
 		for _, future := range toolFutures {
 			outcome := <-future.result
@@ -77,6 +66,10 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			turn.recordToolResult(*outcome.Result)
 			fmt.Printf("tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
 		}
+		if streamFailure != nil {
+			turn.streamFailure = streamFailure
+			return turn
+		}
 		for _, hook := range s.stopHooks {
 			hook(turn)
 		}
@@ -89,6 +82,50 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			continue
 		}
 		return turn
+	}
+}
+
+func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*ToolFuture, *StreamFailure) {
+	maxAttempts := s.streamRetry.MaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	for attempt := 1; ; attempt++ {
+		stream := s.model.Stream(ctx, turn.modelInput())
+		var toolFutures []*ToolFuture
+		completedItems := 0
+		for event := range stream.Events {
+			switch event.Kind {
+			case ModelTextDelta:
+				if s.onTextDelta != nil {
+					s.onTextDelta(event.Delta)
+				}
+			case ModelOutputItemDone:
+				completedItems++
+				if future := s.handleOutputItemDone(ctx, turn, event.Item); future != nil {
+					toolFutures = append(toolFutures, future)
+				}
+			}
+		}
+		failure := <-stream.Err
+		if failure == nil {
+			return toolFutures, nil
+		}
+		// Replaying a stream after a completed item could duplicate an already
+		// executed side effect. Production Codex has richer history recovery;
+		// this teaching version retries only before a semantic item is complete.
+		if !failure.Retryable || completedItems > 0 || attempt == maxAttempts {
+			return toolFutures, failure
+		}
+		if s.streamRetry.Backoff > 0 {
+			timer := time.NewTimer(s.streamRetry.Backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return toolFutures, &StreamFailure{Message: ctx.Err().Error()}
+			case <-timer.C:
+			}
+		}
 	}
 }
 

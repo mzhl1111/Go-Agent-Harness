@@ -21,11 +21,6 @@ type PreHookOutcome struct {
 type PreHook func(ToolCall) PreHookOutcome
 type PostHook func(ToolCall, ToolResult)
 
-type RetryPolicy struct {
-	MaxAttempts int
-	Backoff     time.Duration
-}
-
 // ToolRegistry is the orchestration boundary around reusable executors.
 type ToolRegistry struct {
 	executors map[string]ToolExecutor

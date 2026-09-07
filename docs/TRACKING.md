@@ -60,4 +60,4 @@
 - [x] Replace batch model output with an event stream.
 - [x] Keep text deltas out of durable model history.
 - [x] Route only completed output items into tool dispatch.
-- [ ] Add stream transport errors and move general retry to the model-stream layer.
+- [x] Add stream transport errors and move general retry to the model-stream layer.
