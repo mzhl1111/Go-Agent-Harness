@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,6 +31,23 @@ func (e *flakyExecutor) Handle(_ context.Context, _ string) ToolResult {
 }
 
 type permanentFailureExecutor struct{ calls int }
+
+type recordingObserver struct {
+	mu     sync.Mutex
+	events []DispatchEvent
+}
+
+func (o *recordingObserver) OnDispatch(event DispatchEvent) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, event)
+}
+
+func (o *recordingObserver) snapshot() []DispatchEvent {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]DispatchEvent(nil), o.events...)
+}
 
 func (e *permanentFailureExecutor) Handle(_ context.Context, _ string) ToolResult {
 	e.calls++
@@ -233,5 +251,26 @@ func TestRetryPolicyDoesNotRetryPermanentFailure(t *testing.T) {
 	result := (<-registry.Start(context.Background(), ToolCall{Name: "permanent", ID: "call_permanent"}).result).Result
 	if !result.IsError || result.Attempts != 1 || executor.calls != 1 {
 		t.Fatalf("permanent failure was retried: %#v, calls=%d", result, executor.calls)
+	}
+}
+
+func TestDispatchObserverReceivesRetryLifecycle(t *testing.T) {
+	executor := &flakyExecutor{failuresBeforeSuccess: 1}
+	observer := &recordingObserver{}
+	registry := &ToolRegistry{
+		executors: map[string]ToolExecutor{"flaky": executor},
+		retry:     RetryPolicy{MaxAttempts: 2},
+		observer:  observer,
+	}
+	<-registry.Start(context.Background(), ToolCall{Name: "flaky", ID: "call_observed"}).result
+	events := observer.snapshot()
+	if got, want := len(events), 3; got != want {
+		t.Fatalf("event count = %d, want %d: %#v", got, want, events)
+	}
+	if events[0].Kind != DispatchStarted || events[1].Kind != DispatchRetrying || events[2].Kind != DispatchCompleted {
+		t.Fatalf("unexpected event sequence: %#v", events)
+	}
+	if events[1].Attempt != 1 || events[2].Attempt != 2 || events[2].CallID != "call_observed" {
+		t.Fatalf("unexpected event details: %#v", events)
 	}
 }

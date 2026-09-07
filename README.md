@@ -18,7 +18,7 @@ The program intentionally supports only `echo ...`, making each run deterministi
 2. Streaming output items and concurrent tool futures. *(implemented: futures and concurrent calls; streaming remains next)*
 3. Approvals and terminal outcomes. *(implemented, including exact-call resume)*
 4. Context/history construction and bounded tool outputs. *(implemented)*
-5. Cancellation, retries and observability. *(timeouts and retry implemented; events next)*
+5. Cancellation, retries and observability. *(implemented)*
 
 See [the tracking checklist](docs/TRACKING.md) for the current state.
 

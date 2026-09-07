@@ -49,4 +49,8 @@
 - [x] Propagate a per-tool timeout context from session to executor.
 - [x] Test that a context-aware executor returns a bounded timeout error.
 - [x] Add retry classification and a bounded retry policy.
-- [ ] Add structured dispatch events for observability.
+- [x] Add structured dispatch events for observability.
+
+## Deferred for streaming
+
+- [ ] Contrast executor-level retry in this teaching harness with Codex's response-stream retry loop and explain idempotency.

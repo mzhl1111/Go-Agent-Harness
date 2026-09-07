@@ -49,3 +49,28 @@ type ToolDispatchOutcome struct {
 	Result   *ToolResult
 	Approval *ApprovalRequest
 }
+
+type DispatchEventKind string
+
+const (
+	DispatchStarted         DispatchEventKind = "started"
+	DispatchBlocked         DispatchEventKind = "blocked"
+	DispatchWaitingApproval DispatchEventKind = "waiting_approval"
+	DispatchRetrying        DispatchEventKind = "retrying"
+	DispatchCompleted       DispatchEventKind = "completed"
+	DispatchFailed          DispatchEventKind = "failed"
+)
+
+type DispatchEvent struct {
+	Kind    DispatchEventKind
+	CallID  string
+	Tool    string
+	Attempt int
+	Message string
+}
+
+// DispatchObserver receives lifecycle notifications. Implementations must be
+// safe for concurrent calls because each tool future runs in its own goroutine.
+type DispatchObserver interface {
+	OnDispatch(DispatchEvent)
+}
