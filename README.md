@@ -21,3 +21,5 @@ The program intentionally supports only `echo ...`, making each run deterministi
 5. Cancellation, retries and observability.
 
 See [the tracking checklist](docs/TRACKING.md) for the current state.
+
+The runtime is split into small responsibility-focused files; start with [the module map](docs/06-module-map.md) when navigating the code.

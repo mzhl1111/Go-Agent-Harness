@@ -1,0 +1,122 @@
+package main
+
+import (
+	"context"
+	"fmt"
+)
+
+const maxToolOutputChars = 24
+
+type TurnContext struct {
+	toolResults              []ToolResult
+	pendingApprovals         []ApprovalRequest
+	history                  []HistoryItem
+	lastResponseHadToolCalls bool
+	needsFollowUp            bool
+	followUpReason           string
+}
+
+type StopHook func(*TurnContext)
+
+type Session struct {
+	model        Model
+	tools        *ToolRegistry
+	stopHooks    []StopHook
+	initialInput string
+}
+
+func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) *ToolFuture {
+	if item.Kind == "text" {
+		turn.history = append(turn.history, HistoryItem{Role: "assistant", Content: item.Text})
+		fmt.Println("assistant:", item.Text)
+		return nil
+	}
+	call := ToolCall{Name: item.Tool, Input: item.Input, ID: item.CallID}
+	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
+	future := s.tools.Start(ctx, call)
+	return &future
+}
+
+func (s *Session) runTurn(ctx context.Context) *TurnContext {
+	turn := &TurnContext{history: []HistoryItem{{Role: "user", Content: s.initialInput}}}
+	return s.continueTurn(ctx, turn)
+}
+
+func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
+	for {
+		var toolFutures []*ToolFuture
+		for _, item := range s.model.Next(turn.modelInput()) {
+			if future := s.handleOutputItemDone(ctx, turn, item); future != nil {
+				toolFutures = append(toolFutures, future)
+			}
+		}
+		turn.lastResponseHadToolCalls = len(toolFutures) > 0
+		for _, future := range toolFutures {
+			outcome := <-future.result
+			if outcome.Approval != nil {
+				turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
+				turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
+				fmt.Printf("approval required (%s): %s\n", outcome.Approval.CallID, outcome.Approval.Reason)
+				continue
+			}
+			turn.toolResults = append(turn.toolResults, *outcome.Result)
+			turn.recordToolResult(*outcome.Result)
+			fmt.Printf("tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
+		}
+		for _, hook := range s.stopHooks {
+			hook(turn)
+		}
+		if len(turn.pendingApprovals) > 0 {
+			return turn // The UI can now render approval requests and wait for a user decision.
+		}
+		if turn.needsFollowUp {
+			fmt.Println("stop hook requested follow-up:", turn.followUpReason)
+			turn.needsFollowUp = false
+			continue
+		}
+		return turn
+	}
+}
+
+// resumeApproved runs precisely one previously suspended call, then asks the
+// model for its next response with the same turn context. It never replays the
+// model response that originally created the approval request.
+func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID string) *TurnContext {
+	for index, request := range turn.pendingApprovals {
+		if request.CallID != callID {
+			continue
+		}
+		call := ToolCall{Name: request.Tool, Input: request.Input, ID: request.CallID}
+		outcome := <-s.tools.StartAfterApproval(ctx, call).result
+		turn.pendingApprovals = append(turn.pendingApprovals[:index], turn.pendingApprovals[index+1:]...)
+		if outcome.Result != nil {
+			turn.toolResults = append(turn.toolResults, *outcome.Result)
+			turn.recordToolResult(*outcome.Result)
+			fmt.Printf("approved tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
+		}
+		return s.continueTurn(ctx, turn)
+	}
+	return turn
+}
+
+func (t *TurnContext) modelInput() []HistoryItem {
+	return append([]HistoryItem(nil), t.history...)
+}
+
+func (t *TurnContext) recordToolResult(result ToolResult) {
+	t.history = append(t.history, HistoryItem{
+		Role: "tool", CallID: result.CallID, Content: truncateToolOutput(result.Output, maxToolOutputChars),
+	})
+}
+
+func truncateToolOutput(output string, maxChars int) string {
+	runes := []rune(output)
+	if len(runes) <= maxChars {
+		return output
+	}
+	marker := "..."
+	if maxChars <= len(marker) {
+		return string(runes[:maxChars])
+	}
+	return string(runes[:maxChars-len(marker)]) + marker
+}

@@ -39,3 +39,7 @@
 - Model the control-flow boundary before modeling transport details.
 - Add a test whenever a new behavior changes the turn loop.
 - Keep the upstream clone local and unmodified; write our notes and code here.
+
+## Structure
+
+- [x] Split the teaching implementation into session, registry, executor, model and shared-contract modules.
