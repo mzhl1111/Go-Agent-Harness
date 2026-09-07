@@ -11,12 +11,12 @@
 - [ ] Review `run_turn` in the upstream source line by line, limited to the loop and stop-hook branch.
 - [ ] Compare this Go trace against one real Codex tool call.
 
-## Next milestone: 2 — tool futures and parallelism
+## Current milestone: 2 — tool futures and parallelism
 
-- [ ] Replace the synchronous executor result with a future/channel abstraction.
-- [ ] Permit multiple completed tool-call items in one model response.
-- [ ] Preserve stable call IDs when results return.
-- [ ] Add deterministic tests for result ordering and errors.
+- [x] Replace the synchronous executor result with a future/channel abstraction.
+- [x] Permit multiple completed tool-call items in one model response.
+- [x] Preserve stable call IDs when results return.
+- [x] Add deterministic tests for concurrent starts, result ordering and errors.
 
 ## Ground rules
 

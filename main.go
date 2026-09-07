@@ -16,6 +16,7 @@ type ResponseItem struct {
 }
 
 type ToolResult struct {
+	CallID  string
 	Output  string
 	IsError bool
 }
@@ -45,6 +46,12 @@ type ToolCall struct {
 	Name, Input, ID string
 }
 
+// ToolFuture represents a started tool call whose result will be available later.
+type ToolFuture struct {
+	call   ToolCall
+	result <-chan ToolResult
+}
+
 // ToolRegistry is the orchestration boundary around reusable executors.
 type ToolRegistry struct {
 	executors map[string]ToolExecutor
@@ -52,21 +59,28 @@ type ToolRegistry struct {
 	post      []PostHook
 }
 
-func (r *ToolRegistry) DispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall) ToolResult {
+func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall) ToolResult {
 	for _, hook := range r.pre {
 		if err := hook(call); err != nil {
-			return ToolResult{IsError: true, Output: err.Error()}
+			return ToolResult{CallID: call.ID, IsError: true, Output: err.Error()}
 		}
 	}
 	executor, ok := r.executors[call.Name]
 	if !ok {
-		return ToolResult{IsError: true, Output: "unknown tool: " + call.Name}
+		return ToolResult{CallID: call.ID, IsError: true, Output: "unknown tool: " + call.Name}
 	}
 	result := executor.Handle(ctx, call.Input)
+	result.CallID = call.ID
 	for _, hook := range r.post {
 		hook(call, result)
 	}
 	return result
+}
+
+func (r *ToolRegistry) Start(ctx context.Context, call ToolCall) ToolFuture {
+	result := make(chan ToolResult, 1)
+	go func() { result <- r.dispatchAnyWithTerminalOutcome(ctx, call) }()
+	return ToolFuture{call: call, result: result}
 }
 
 type TurnContext struct {
@@ -77,6 +91,10 @@ type TurnContext struct {
 
 type StopHook func(*TurnContext)
 
+type Model interface {
+	Next(*TurnContext) []ResponseItem
+}
+
 // ScriptedModel stands in for the Responses API. Each loop iteration obtains
 // one response; tool results accumulated in TurnContext are its next context.
 type ScriptedModel struct{ responseNumber int }
@@ -84,33 +102,45 @@ type ScriptedModel struct{ responseNumber int }
 func (m *ScriptedModel) Next(_ *TurnContext) []ResponseItem {
 	m.responseNumber++
 	if m.responseNumber == 1 {
-		return []ResponseItem{{Kind: "tool_call", Tool: "exec_command", Input: "echo hello harness", CallID: "call_1"}}
+		return []ResponseItem{
+			{Kind: "tool_call", Tool: "exec_command", Input: "echo hello", CallID: "call_1"},
+			{Kind: "tool_call", Tool: "exec_command", Input: "echo harness", CallID: "call_2"},
+		}
 	}
-	return []ResponseItem{{Kind: "text", Text: "The executor returned its result; the turn is complete."}}
+	return []ResponseItem{{Kind: "text", Text: "Both executor results returned; the turn is complete."}}
 }
 
 type Session struct {
-	model     *ScriptedModel
+	model     Model
 	tools     *ToolRegistry
 	stopHooks []StopHook
 }
 
-func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) {
+func (s *Session) handleOutputItemDone(ctx context.Context, item ResponseItem) *ToolFuture {
 	if item.Kind == "text" {
 		fmt.Println("assistant:", item.Text)
-		return
+		return nil
 	}
 	call := ToolCall{Name: item.Tool, Input: item.Input, ID: item.CallID}
-	result := s.tools.DispatchAnyWithTerminalOutcome(ctx, call)
-	turn.toolResults = append(turn.toolResults, result) // equivalent to completing tool_future
-	fmt.Println("tool result:", result.Output)
+	future := s.tools.Start(ctx, call)
+	return &future
 }
 
-func (s *Session) runTurn(ctx context.Context) {
+func (s *Session) runTurn(ctx context.Context) *TurnContext {
 	turn := &TurnContext{}
 	for {
+		var toolFutures []*ToolFuture
 		for _, item := range s.model.Next(turn) {
-			s.handleOutputItemDone(ctx, turn, item)
+			if future := s.handleOutputItemDone(ctx, item); future != nil {
+				toolFutures = append(toolFutures, future)
+			}
+		}
+		// Every call is already running. Await in model-item order so the next
+		// response receives deterministic, CallID-associated tool outputs.
+		for _, future := range toolFutures {
+			result := <-future.result
+			turn.toolResults = append(turn.toolResults, result)
+			fmt.Printf("tool result (%s): %s\n", result.CallID, result.Output)
 		}
 		for _, hook := range s.stopHooks {
 			hook(turn)
@@ -120,7 +150,7 @@ func (s *Session) runTurn(ctx context.Context) {
 			turn.needsFollowUp = false
 			continue // the crucial re-entry into the outer turn loop
 		}
-		return
+		return turn
 	}
 }
 
@@ -135,7 +165,7 @@ func main() {
 			// A stop hook sees all accumulated turn state on every loop pass.
 			// Marking its decision prevents the same result from requesting an
 			// unbounded series of follow-up responses.
-			if len(t.toolResults) == 1 && t.followUpReason == "" {
+			if len(t.toolResults) == 2 && t.followUpReason == "" {
 				t.needsFollowUp, t.followUpReason = true, "send tool result back to model"
 			}
 		}},
