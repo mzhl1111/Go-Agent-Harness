@@ -21,6 +21,12 @@ type ToolResult struct {
 	IsError bool
 }
 
+const maxToolOutputChars = 24
+
+type HistoryItem struct {
+	Role, Content, CallID string
+}
+
 // ToolExecutor is the reusable tool contract (like codex-tools).
 // Session, approvals, looping, and hooks deliberately do not live here.
 type ToolExecutor interface {
@@ -124,6 +130,7 @@ func (r *ToolRegistry) StartAfterApproval(ctx context.Context, call ToolCall) To
 type TurnContext struct {
 	toolResults              []ToolResult
 	pendingApprovals         []ApprovalRequest
+	history                  []HistoryItem
 	lastResponseHadToolCalls bool
 	needsFollowUp            bool
 	followUpReason           string
@@ -132,14 +139,14 @@ type TurnContext struct {
 type StopHook func(*TurnContext)
 
 type Model interface {
-	Next(*TurnContext) []ResponseItem
+	Next([]HistoryItem) []ResponseItem
 }
 
 // ScriptedModel stands in for the Responses API. Each loop iteration obtains
 // one response; tool results accumulated in TurnContext are its next context.
 type ScriptedModel struct{ responseNumber int }
 
-func (m *ScriptedModel) Next(_ *TurnContext) []ResponseItem {
+func (m *ScriptedModel) Next(_ []HistoryItem) []ResponseItem {
 	m.responseNumber++
 	if m.responseNumber == 1 {
 		return []ResponseItem{
@@ -151,30 +158,34 @@ func (m *ScriptedModel) Next(_ *TurnContext) []ResponseItem {
 }
 
 type Session struct {
-	model     Model
-	tools     *ToolRegistry
-	stopHooks []StopHook
+	model        Model
+	tools        *ToolRegistry
+	stopHooks    []StopHook
+	initialInput string
 }
 
-func (s *Session) handleOutputItemDone(ctx context.Context, item ResponseItem) *ToolFuture {
+func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) *ToolFuture {
 	if item.Kind == "text" {
+		turn.history = append(turn.history, HistoryItem{Role: "assistant", Content: item.Text})
 		fmt.Println("assistant:", item.Text)
 		return nil
 	}
 	call := ToolCall{Name: item.Tool, Input: item.Input, ID: item.CallID}
+	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
 	future := s.tools.Start(ctx, call)
 	return &future
 }
 
 func (s *Session) runTurn(ctx context.Context) *TurnContext {
-	return s.continueTurn(ctx, &TurnContext{})
+	turn := &TurnContext{history: []HistoryItem{{Role: "user", Content: s.initialInput}}}
+	return s.continueTurn(ctx, turn)
 }
 
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
 		var toolFutures []*ToolFuture
-		for _, item := range s.model.Next(turn) {
-			if future := s.handleOutputItemDone(ctx, item); future != nil {
+		for _, item := range s.model.Next(turn.modelInput()) {
+			if future := s.handleOutputItemDone(ctx, turn, item); future != nil {
 				toolFutures = append(toolFutures, future)
 			}
 		}
@@ -185,10 +196,12 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			outcome := <-future.result
 			if outcome.Approval != nil {
 				turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
+				turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
 				fmt.Printf("approval required (%s): %s\n", outcome.Approval.CallID, outcome.Approval.Reason)
 				continue
 			}
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
+			turn.recordToolResult(*outcome.Result)
 			fmt.Printf("tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
 		}
 		for _, hook := range s.stopHooks {
@@ -219,11 +232,34 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 		turn.pendingApprovals = append(turn.pendingApprovals[:index], turn.pendingApprovals[index+1:]...)
 		if outcome.Result != nil {
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
+			turn.recordToolResult(*outcome.Result)
 			fmt.Printf("approved tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
 		}
 		return s.continueTurn(ctx, turn)
 	}
 	return turn
+}
+
+func (t *TurnContext) modelInput() []HistoryItem {
+	return append([]HistoryItem(nil), t.history...)
+}
+
+func (t *TurnContext) recordToolResult(result ToolResult) {
+	t.history = append(t.history, HistoryItem{
+		Role: "tool", CallID: result.CallID, Content: truncateToolOutput(result.Output, maxToolOutputChars),
+	})
+}
+
+func truncateToolOutput(output string, maxChars int) string {
+	runes := []rune(output)
+	if len(runes) <= maxChars {
+		return output
+	}
+	marker := "..."
+	if maxChars <= len(marker) {
+		return string(runes[:maxChars])
+	}
+	return string(runes[:maxChars-len(marker)]) + marker
 }
 
 func main() {
@@ -238,7 +274,7 @@ func main() {
 		}},
 		post: []PostHook{func(c ToolCall, r ToolResult) { fmt.Println("post hook:", c.ID, "error=", r.IsError) }},
 	}
-	session := &Session{model: &ScriptedModel{}, tools: tools,
+	session := &Session{model: &ScriptedModel{}, tools: tools, initialInput: "Run the demo tools.",
 		stopHooks: []StopHook{func(t *TurnContext) {
 			// A stop hook sees all accumulated turn state on every loop pass.
 			// Marking its decision prevents the same result from requesting an

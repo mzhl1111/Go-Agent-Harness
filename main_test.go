@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +26,21 @@ func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 
 type oneResponseModel struct{ items []ResponseItem }
 
-func (m oneResponseModel) Next(*TurnContext) []ResponseItem { return m.items }
+func (m oneResponseModel) Next([]HistoryItem) []ResponseItem { return m.items }
+
+type historyRecordingModel struct {
+	inputs         [][]HistoryItem
+	responseNumber int
+}
+
+func (m *historyRecordingModel) Next(input []HistoryItem) []ResponseItem {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responseNumber++
+	if m.responseNumber == 1 {
+		return []ResponseItem{{Kind: "tool_call", Tool: "echo", Input: "a very long tool result for context", CallID: "call_1"}}
+	}
+	return []ResponseItem{{Kind: "text", Text: "done"}}
+}
 
 func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
 	release := make(chan struct{})
@@ -110,5 +125,38 @@ func TestApprovedCallResumesWithoutReplayingTheOriginalResponse(t *testing.T) {
 	}
 	if got, want := len(turn.toolResults), 2; got != want {
 		t.Fatalf("tool result count = %d, want %d", got, want)
+	}
+}
+
+func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
+	model := &historyRecordingModel{}
+	session := &Session{
+		model:        model,
+		initialInput: "test task",
+		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
+		stopHooks: []StopHook{func(turn *TurnContext) {
+			if turn.lastResponseHadToolCalls && len(turn.toolResults) == 1 && turn.followUpReason == "" {
+				turn.needsFollowUp, turn.followUpReason = true, "return tool output to model"
+			}
+		}},
+	}
+	session.runTurn(context.Background())
+
+	if got, want := len(model.inputs), 2; got != want {
+		t.Fatalf("model calls = %d, want %d", got, want)
+	}
+	secondInput := model.inputs[1]
+	if got, want := secondInput[0].Content, "test task"; got != want {
+		t.Errorf("initial history = %q, want %q", got, want)
+	}
+	toolOutput := secondInput[len(secondInput)-1]
+	if toolOutput.Role != "tool" || toolOutput.CallID != "call_1" {
+		t.Fatalf("unexpected last history item: %#v", toolOutput)
+	}
+	if got := len([]rune(toolOutput.Content)); got > maxToolOutputChars {
+		t.Errorf("tool output length = %d, exceeds cap %d", got, maxToolOutputChars)
+	}
+	if !strings.HasSuffix(toolOutput.Content, "...") {
+		t.Errorf("truncated output = %q, want truncation marker", toolOutput.Content)
 	}
 }

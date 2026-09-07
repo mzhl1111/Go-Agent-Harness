@@ -26,11 +26,12 @@
 - [x] Retain pending approval details in turn context with the original call ID.
 - [x] Resume an approved tool call without replaying the whole model response.
 
-## Next milestone: 4 — context and bounded outputs
+## Current milestone: 4 — context and bounded outputs
 
-- [ ] Make the model's input an explicit, inspectable turn-history value.
-- [ ] Serialize tool results and approval states into that history.
-- [ ] Add a hard cap to tool output inserted into context.
+- [x] Make the model's input an explicit, inspectable turn-history value.
+- [x] Serialize tool results and approval states into that history.
+- [x] Add a hard cap to tool output inserted into context.
+- [x] Test that the model receives append-only history with truncated tool output.
 
 ## Ground rules
 
