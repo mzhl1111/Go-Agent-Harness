@@ -10,6 +10,13 @@ type blockingExecutor struct {
 	release <-chan struct{}
 }
 
+type countingExecutor struct{ calls int }
+
+func (e *countingExecutor) Handle(_ context.Context, input string) ToolResult {
+	e.calls++
+	return ToolResult{Output: input}
+}
+
 func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 	e.started <- input
 	<-e.release
@@ -52,8 +59,27 @@ func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
 func TestUnknownToolProducesCallAssociatedError(t *testing.T) {
 	registry := &ToolRegistry{}
 	future := registry.Start(context.Background(), ToolCall{Name: "missing", ID: "call_missing"})
-	result := <-future.result
+	result := (<-future.result).Result
 	if !result.IsError || result.CallID != "call_missing" {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestApprovalRequestSkipsExecutorAndPreservesCallIdentity(t *testing.T) {
+	executor := &countingExecutor{}
+	registry := &ToolRegistry{
+		executors: map[string]ToolExecutor{"exec": executor},
+		pre: []PreHook{func(ToolCall) PreHookOutcome {
+			return PreHookOutcome{Decision: PreHookNeedsApproval, Reason: "needs user consent"}
+		}},
+	}
+	future := registry.Start(context.Background(), ToolCall{Name: "exec", Input: "echo sensitive", ID: "call_approval"})
+	outcome := <-future.result
+
+	if executor.calls != 0 {
+		t.Fatalf("executor ran %d times, want 0", executor.calls)
+	}
+	if outcome.Approval == nil || outcome.Approval.CallID != "call_approval" {
+		t.Fatalf("unexpected approval outcome: %#v", outcome)
 	}
 }

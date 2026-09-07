@@ -18,6 +18,14 @@
 - [x] Preserve stable call IDs when results return.
 - [x] Add deterministic tests for concurrent starts, result ordering and errors.
 
+## Current milestone: 3 — approvals and terminal outcomes
+
+- [x] Let a pre-hook continue, block, or require approval.
+- [x] Represent an approval request as a terminal dispatch outcome.
+- [x] Ensure an approval request skips the executor and post-hook.
+- [x] Retain pending approval details in turn context with the original call ID.
+- [ ] Resume an approved tool call without replaying the whole model response.
+
 ## Ground rules
 
 - Keep every milestone runnable and small.
