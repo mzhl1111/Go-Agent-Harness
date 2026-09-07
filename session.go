@@ -25,6 +25,7 @@ type Session struct {
 	stopHooks    []StopHook
 	initialInput string
 	toolTimeout  time.Duration
+	onTextDelta  func(string)
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) *ToolFuture {
@@ -47,9 +48,17 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
 		var toolFutures []*ToolFuture
-		for _, item := range s.model.Next(turn.modelInput()) {
-			if future := s.handleOutputItemDone(ctx, turn, item); future != nil {
-				toolFutures = append(toolFutures, future)
+		for event := range s.model.Stream(ctx, turn.modelInput()) {
+			if event.Kind == ModelTextDelta {
+				if s.onTextDelta != nil {
+					s.onTextDelta(event.Delta)
+				}
+				continue
+			}
+			if event.Kind == ModelOutputItemDone {
+				if future := s.handleOutputItemDone(ctx, turn, event.Item); future != nil {
+					toolFutures = append(toolFutures, future)
+				}
 			}
 		}
 		turn.lastResponseHadToolCalls = len(toolFutures) > 0

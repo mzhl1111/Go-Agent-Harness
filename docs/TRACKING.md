@@ -53,4 +53,11 @@
 
 ## Deferred for streaming
 
-- [ ] Contrast executor-level retry in this teaching harness with Codex's response-stream retry loop and explain idempotency.
+- [x] Contrast executor-level retry in this teaching harness with Codex's response-stream retry loop and explain idempotency.
+
+## Current milestone: 6 — streaming model output
+
+- [x] Replace batch model output with an event stream.
+- [x] Keep text deltas out of durable model history.
+- [x] Route only completed output items into tool dispatch.
+- [ ] Add stream transport errors and move general retry to the model-stream layer.

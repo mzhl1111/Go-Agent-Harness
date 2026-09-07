@@ -72,20 +72,29 @@ func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 
 type oneResponseModel struct{ items []ResponseItem }
 
-func (m oneResponseModel) Next([]HistoryItem) []ResponseItem { return m.items }
+func (m oneResponseModel) Stream(ctx context.Context, _ []HistoryItem) <-chan ModelEvent {
+	events := make([]ModelEvent, 0, len(m.items))
+	for _, item := range m.items {
+		events = append(events, ModelEvent{Kind: ModelOutputItemDone, Item: item})
+	}
+	return modelEventStream(ctx, events...)
+}
 
 type historyRecordingModel struct {
 	inputs         [][]HistoryItem
 	responseNumber int
 }
 
-func (m *historyRecordingModel) Next(input []HistoryItem) []ResponseItem {
+func (m *historyRecordingModel) Stream(ctx context.Context, input []HistoryItem) <-chan ModelEvent {
 	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
 	m.responseNumber++
 	if m.responseNumber == 1 {
-		return []ResponseItem{{Kind: "tool_call", Tool: "echo", Input: "a very long tool result for context", CallID: "call_1"}}
+		return modelEventStream(ctx,
+			ModelEvent{Kind: ModelTextDelta, Delta: "draft text"},
+			ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "echo", Input: "a very long tool result for context", CallID: "call_1"}},
+		)
 	}
-	return []ResponseItem{{Kind: "text", Text: "done"}}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "done"}})
 }
 
 func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
@@ -176,9 +185,11 @@ func TestApprovedCallResumesWithoutReplayingTheOriginalResponse(t *testing.T) {
 
 func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 	model := &historyRecordingModel{}
+	var deltas []string
 	session := &Session{
 		model:        model,
 		initialInput: "test task",
+		onTextDelta:  func(delta string) { deltas = append(deltas, delta) },
 		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
 		stopHooks: []StopHook{func(turn *TurnContext) {
 			if turn.lastResponseHadToolCalls && len(turn.toolResults) == 1 && turn.followUpReason == "" {
@@ -204,6 +215,14 @@ func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 	}
 	if !strings.HasSuffix(toolOutput.Content, "...") {
 		t.Errorf("truncated output = %q, want truncation marker", toolOutput.Content)
+	}
+	if got, want := strings.Join(deltas, ""), "draft text"; got != want {
+		t.Errorf("streamed deltas = %q, want %q", got, want)
+	}
+	for _, item := range secondInput {
+		if item.Content == "draft text" {
+			t.Error("text delta leaked into authoritative model history")
+		}
 	}
 }
 
