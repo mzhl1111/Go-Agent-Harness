@@ -39,6 +39,7 @@ type ToolExecutor interface {
 type ToolFuture struct {
 	call   ToolCall
 	result <-chan ToolDispatchOutcome
+	cancel func()
 }
 
 // ToolDispatchOutcome makes "do not run the handler" explicit.

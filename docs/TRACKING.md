@@ -43,3 +43,10 @@
 ## Structure
 
 - [x] Split the teaching implementation into session, registry, executor, model and shared-contract modules.
+
+## Current milestone: 5 — cancellation, retry and observability
+
+- [x] Propagate a per-tool timeout context from session to executor.
+- [x] Test that a context-aware executor returns a bounded timeout error.
+- [ ] Add retry classification and a bounded retry policy.
+- [ ] Add structured dispatch events for observability.

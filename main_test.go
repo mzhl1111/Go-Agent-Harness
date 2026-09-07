@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type blockingExecutor struct {
@@ -12,6 +13,13 @@ type blockingExecutor struct {
 }
 
 type countingExecutor struct{ calls int }
+
+type contextWaitingExecutor struct{}
+
+func (contextWaitingExecutor) Handle(ctx context.Context, _ string) ToolResult {
+	<-ctx.Done()
+	return ToolResult{IsError: true, Output: ctx.Err().Error()}
+}
 
 func (e *countingExecutor) Handle(_ context.Context, input string) ToolResult {
 	e.calls++
@@ -158,5 +166,21 @@ func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 	}
 	if !strings.HasSuffix(toolOutput.Content, "...") {
 		t.Errorf("truncated output = %q, want truncation marker", toolOutput.Content)
+	}
+}
+
+func TestSessionToolTimeoutCancelsContextAwareExecutor(t *testing.T) {
+	session := &Session{
+		model:       oneResponseModel{items: []ResponseItem{{Kind: "tool_call", Tool: "wait", CallID: "call_timeout"}}},
+		tools:       &ToolRegistry{executors: map[string]ToolExecutor{"wait": contextWaitingExecutor{}}},
+		toolTimeout: 10 * time.Millisecond,
+	}
+	turn := session.runTurn(context.Background())
+	if got, want := len(turn.toolResults), 1; got != want {
+		t.Fatalf("tool result count = %d, want %d", got, want)
+	}
+	result := turn.toolResults[0]
+	if !result.IsError || result.CallID != "call_timeout" || result.Output != context.DeadlineExceeded.Error() {
+		t.Fatalf("unexpected timeout result: %#v", result)
 	}
 }

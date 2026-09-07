@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 const maxToolOutputChars = 24
@@ -23,6 +24,7 @@ type Session struct {
 	tools        *ToolRegistry
 	stopHooks    []StopHook
 	initialInput string
+	toolTimeout  time.Duration
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) *ToolFuture {
@@ -33,7 +35,7 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 	}
 	call := ToolCall{Name: item.Tool, Input: item.Input, ID: item.CallID}
 	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
-	future := s.tools.Start(ctx, call)
+	future := s.startTool(ctx, call, false)
 	return &future
 }
 
@@ -53,6 +55,9 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 		turn.lastResponseHadToolCalls = len(toolFutures) > 0
 		for _, future := range toolFutures {
 			outcome := <-future.result
+			if future.cancel != nil {
+				future.cancel()
+			}
 			if outcome.Approval != nil {
 				turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
 				turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
@@ -87,7 +92,11 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 			continue
 		}
 		call := ToolCall{Name: request.Tool, Input: request.Input, ID: request.CallID}
-		outcome := <-s.tools.StartAfterApproval(ctx, call).result
+		future := s.startTool(ctx, call, true)
+		outcome := <-future.result
+		if future.cancel != nil {
+			future.cancel()
+		}
 		turn.pendingApprovals = append(turn.pendingApprovals[:index], turn.pendingApprovals[index+1:]...)
 		if outcome.Result != nil {
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
@@ -97,6 +106,22 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 		return s.continueTurn(ctx, turn)
 	}
 	return turn
+}
+
+func (s *Session) startTool(ctx context.Context, call ToolCall, approvalGranted bool) ToolFuture {
+	toolCtx := ctx
+	var cancel context.CancelFunc
+	if s.toolTimeout > 0 {
+		toolCtx, cancel = context.WithTimeout(ctx, s.toolTimeout)
+	}
+	var future ToolFuture
+	if approvalGranted {
+		future = s.tools.StartAfterApproval(toolCtx, call)
+	} else {
+		future = s.tools.Start(toolCtx, call)
+	}
+	future.cancel = cancel
+	return future
 }
 
 func (t *TurnContext) modelInput() []HistoryItem {

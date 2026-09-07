@@ -7,7 +7,7 @@ The mini harness is now split by runtime responsibility instead of by the order 
 | `main.go` | Demo wiring and a demo stop hook | Harness runtime logic |
 | `types.go` | Shared contracts and data structures | Dispatch policy or execution |
 | `model.go` | The `Model` boundary and scripted demo responses | Turn state or tools |
-| `session.go` | Turn loop, history, follow-up, pause/resume | Tool-specific behavior |
+| `session.go` | Turn loop, history, follow-up, pause/resume and tool timeouts | Tool-specific behavior |
 | `registry.go` | Pre-hook, dispatch outcome, futures, post-hook | Model loop or history |
 | `executor.go` | The safe `echo` executor | Approval, hooks or turn state |
 
