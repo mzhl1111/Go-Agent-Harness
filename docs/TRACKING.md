@@ -48,5 +48,5 @@
 
 - [x] Propagate a per-tool timeout context from session to executor.
 - [x] Test that a context-aware executor returns a bounded timeout error.
-- [ ] Add retry classification and a bounded retry policy.
+- [x] Add retry classification and a bounded retry policy.
 - [ ] Add structured dispatch events for observability.

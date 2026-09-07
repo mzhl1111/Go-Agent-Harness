@@ -16,6 +16,26 @@ type countingExecutor struct{ calls int }
 
 type contextWaitingExecutor struct{}
 
+type flakyExecutor struct {
+	failuresBeforeSuccess int
+	calls                 int
+}
+
+func (e *flakyExecutor) Handle(_ context.Context, _ string) ToolResult {
+	e.calls++
+	if e.calls <= e.failuresBeforeSuccess {
+		return ToolResult{IsError: true, Retryable: true, Output: "temporary failure"}
+	}
+	return ToolResult{Output: "success"}
+}
+
+type permanentFailureExecutor struct{ calls int }
+
+func (e *permanentFailureExecutor) Handle(_ context.Context, _ string) ToolResult {
+	e.calls++
+	return ToolResult{IsError: true, Output: "permanent failure"}
+}
+
 func (contextWaitingExecutor) Handle(ctx context.Context, _ string) ToolResult {
 	<-ctx.Done()
 	return ToolResult{IsError: true, Output: ctx.Err().Error()}
@@ -182,5 +202,36 @@ func TestSessionToolTimeoutCancelsContextAwareExecutor(t *testing.T) {
 	result := turn.toolResults[0]
 	if !result.IsError || result.CallID != "call_timeout" || result.Output != context.DeadlineExceeded.Error() {
 		t.Fatalf("unexpected timeout result: %#v", result)
+	}
+}
+
+func TestRetryPolicyRetriesOnlyRetryableFailuresWithinLimit(t *testing.T) {
+	executor := &flakyExecutor{failuresBeforeSuccess: 2}
+	registry := &ToolRegistry{
+		executors: map[string]ToolExecutor{"flaky": executor},
+		retry:     RetryPolicy{MaxAttempts: 3},
+	}
+	result := (<-registry.Start(context.Background(), ToolCall{Name: "flaky", ID: "call_retry"}).result).Result
+	if result.IsError || result.Attempts != 3 || executor.calls != 3 {
+		t.Fatalf("unexpected retry result: %#v, calls=%d", result, executor.calls)
+	}
+
+	exhausted := &flakyExecutor{failuresBeforeSuccess: 3}
+	registry.executors["flaky"] = exhausted
+	result = (<-registry.Start(context.Background(), ToolCall{Name: "flaky", ID: "call_exhausted"}).result).Result
+	if !result.IsError || result.Attempts != 3 || exhausted.calls != 3 {
+		t.Fatalf("retry limit was not respected: %#v, calls=%d", result, exhausted.calls)
+	}
+}
+
+func TestRetryPolicyDoesNotRetryPermanentFailure(t *testing.T) {
+	executor := &permanentFailureExecutor{}
+	registry := &ToolRegistry{
+		executors: map[string]ToolExecutor{"permanent": executor},
+		retry:     RetryPolicy{MaxAttempts: 3},
+	}
+	result := (<-registry.Start(context.Background(), ToolCall{Name: "permanent", ID: "call_permanent"}).result).Result
+	if !result.IsError || result.Attempts != 1 || executor.calls != 1 {
+		t.Fatalf("permanent failure was retried: %#v, calls=%d", result, executor.calls)
 	}
 }

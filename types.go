@@ -12,9 +12,11 @@ type ResponseItem struct {
 }
 
 type ToolResult struct {
-	CallID  string
-	Output  string
-	IsError bool
+	CallID    string
+	Output    string
+	IsError   bool
+	Retryable bool
+	Attempts  int
 }
 
 type HistoryItem struct {
