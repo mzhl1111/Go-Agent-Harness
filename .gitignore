@@ -1,0 +1,5 @@
+# The upstream source is a local, read-only reference clone.
+reference/codex/
+
+# Go build artifacts
+mini-harness
