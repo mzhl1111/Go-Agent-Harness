@@ -10,8 +10,11 @@ func (m *ScriptedModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream
 	m.responseNumber++
 	if m.responseNumber == 1 {
 		return modelEventStream(ctx,
-			ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "exec_command", Input: "echo hello", CallID: "call_1"}},
-			ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "exec_command", Input: "echo gated", CallID: "call_2"}},
+			ModelEvent{Kind: ModelToolInputDelta, CallID: "call_1", Delta: "echo "},
+			ModelEvent{Kind: ModelToolInputDelta, CallID: "call_1", Delta: "hello"},
+			ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "exec_command", CallID: "call_1"}},
+			ModelEvent{Kind: ModelToolInputDelta, CallID: "call_2", Delta: "echo gated"},
+			ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "exec_command", CallID: "call_2"}},
 		)
 	}
 	return modelEventStream(ctx,

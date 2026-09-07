@@ -32,6 +32,13 @@ func (e *flakyExecutor) Handle(_ context.Context, _ string) ToolResult {
 
 type permanentFailureExecutor struct{ calls int }
 
+type inputRecordingExecutor struct{ input string }
+
+func (e *inputRecordingExecutor) Handle(_ context.Context, input string) ToolResult {
+	e.input = input
+	return ToolResult{Output: input}
+}
+
 type recordingObserver struct {
 	mu     sync.Mutex
 	events []DispatchEvent
@@ -100,6 +107,16 @@ func (m *historyRecordingModel) Stream(ctx context.Context, input []HistoryItem)
 type flakyStreamModel struct {
 	attempts          int
 	failAfterToolCall bool
+}
+
+type toolInputDeltaModel struct{}
+
+func (toolInputDeltaModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	return modelEventStream(ctx,
+		ModelEvent{Kind: ModelToolInputDelta, CallID: "call_delta", Delta: "echo "},
+		ModelEvent{Kind: ModelToolInputDelta, CallID: "call_delta", Delta: "assembled"},
+		ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "exec", CallID: "call_delta"}},
+	)
 }
 
 func (m *flakyStreamModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
@@ -338,5 +355,27 @@ func TestSessionDoesNotRetryStreamAfterCompletedToolItem(t *testing.T) {
 	}
 	if turn.streamFailure == nil || turn.streamFailure.Message != "connection lost" {
 		t.Fatalf("stream failure was not retained: %#v", turn.streamFailure)
+	}
+}
+
+func TestToolInputDeltasAreAssembledOnlyWhenItemCompletes(t *testing.T) {
+	executor := &inputRecordingExecutor{}
+	var deltas []string
+	session := &Session{
+		model: toolInputDeltaModel{},
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{"exec": executor}},
+		onToolInputDelta: func(callID, delta string) {
+			deltas = append(deltas, callID+":"+delta)
+		},
+	}
+	turn := session.runTurn(context.Background())
+	if got, want := executor.input, "echo assembled"; got != want {
+		t.Fatalf("executor input = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(deltas, ","), "call_delta:echo ,call_delta:assembled"; got != want {
+		t.Errorf("observed input deltas = %q, want %q", got, want)
+	}
+	if _, ok := turn.streamedToolInputs["call_delta"]; ok {
+		t.Error("completed tool call still has a streamed input buffer")
 	}
 }

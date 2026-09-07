@@ -61,3 +61,4 @@
 - [x] Keep text deltas out of durable model history.
 - [x] Route only completed output items into tool dispatch.
 - [x] Add stream transport errors and move general retry to the model-stream layer.
+- [x] Buffer streamed tool-input deltas by call ID until the output item completes.

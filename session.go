@@ -12,6 +12,7 @@ type TurnContext struct {
 	toolResults              []ToolResult
 	pendingApprovals         []ApprovalRequest
 	history                  []HistoryItem
+	streamedToolInputs       map[string]string
 	lastResponseHadToolCalls bool
 	needsFollowUp            bool
 	followUpReason           string
@@ -21,13 +22,14 @@ type TurnContext struct {
 type StopHook func(*TurnContext)
 
 type Session struct {
-	model        Model
-	tools        *ToolRegistry
-	stopHooks    []StopHook
-	initialInput string
-	toolTimeout  time.Duration
-	streamRetry  RetryPolicy
-	onTextDelta  func(string)
+	model            Model
+	tools            *ToolRegistry
+	stopHooks        []StopHook
+	initialInput     string
+	toolTimeout      time.Duration
+	streamRetry      RetryPolicy
+	onTextDelta      func(string)
+	onToolInputDelta func(callID, delta string)
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) *ToolFuture {
@@ -43,7 +45,10 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 }
 
 func (s *Session) runTurn(ctx context.Context) *TurnContext {
-	turn := &TurnContext{history: []HistoryItem{{Role: "user", Content: s.initialInput}}}
+	turn := &TurnContext{
+		history:            []HistoryItem{{Role: "user", Content: s.initialInput}},
+		streamedToolInputs: make(map[string]string),
+	}
 	return s.continueTurn(ctx, turn)
 }
 
@@ -100,9 +105,15 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 				if s.onTextDelta != nil {
 					s.onTextDelta(event.Delta)
 				}
+			case ModelToolInputDelta:
+				turn.streamedToolInputs[event.CallID] += event.Delta
+				if s.onToolInputDelta != nil {
+					s.onToolInputDelta(event.CallID, event.Delta)
+				}
 			case ModelOutputItemDone:
 				completedItems++
-				if future := s.handleOutputItemDone(ctx, turn, event.Item); future != nil {
+				item := turn.finalizeStreamedToolInput(event.Item)
+				if future := s.handleOutputItemDone(ctx, turn, item); future != nil {
 					toolFutures = append(toolFutures, future)
 				}
 			}
@@ -127,6 +138,19 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 			}
 		}
 	}
+}
+
+func (t *TurnContext) finalizeStreamedToolInput(item ResponseItem) ResponseItem {
+	if item.Kind != "tool_call" {
+		return item
+	}
+	if input, ok := t.streamedToolInputs[item.CallID]; ok {
+		if item.Input == "" {
+			item.Input = input
+		}
+		delete(t.streamedToolInputs, item.CallID)
+	}
+	return item
 }
 
 // resumeApproved runs precisely one previously suspended call, then asks the

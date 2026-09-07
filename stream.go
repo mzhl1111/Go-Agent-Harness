@@ -6,13 +6,15 @@ type ModelEventKind string
 
 const (
 	ModelTextDelta      ModelEventKind = "text_delta"
+	ModelToolInputDelta ModelEventKind = "tool_input_delta"
 	ModelOutputItemDone ModelEventKind = "output_item_done"
 )
 
 type ModelEvent struct {
-	Kind  ModelEventKind
-	Delta string
-	Item  ResponseItem
+	Kind   ModelEventKind
+	Delta  string
+	CallID string
+	Item   ResponseItem
 }
 
 type StreamFailure struct {
