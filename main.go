@@ -132,7 +132,10 @@ func main() {
 	}
 	session := &Session{model: &ScriptedModel{}, tools: tools,
 		stopHooks: []StopHook{func(t *TurnContext) {
-			if len(t.toolResults) == 1 {
+			// A stop hook sees all accumulated turn state on every loop pass.
+			// Marking its decision prevents the same result from requesting an
+			// unbounded series of follow-up responses.
+			if len(t.toolResults) == 1 && t.followUpReason == "" {
 				t.needsFollowUp, t.followUpReason = true, "send tool result back to model"
 			}
 		}},

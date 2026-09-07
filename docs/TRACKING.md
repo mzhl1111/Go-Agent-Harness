@@ -6,6 +6,8 @@
 - [x] Locate the five primary runtime entry points in the current upstream source.
 - [x] Implement a minimal `runTurn → ToolRegistry → ToolExecutor → StopHook` flow.
 - [x] Demonstrate `needsFollowUp` re-entering the outer loop.
+- [x] Guard the stop-hook decision so an unchanged tool result cannot cause an infinite follow-up loop.
+- [x] Run the mini harness and `go test ./...` with Go 1.27.1.
 - [ ] Review `run_turn` in the upstream source line by line, limited to the loop and stop-hook branch.
 - [ ] Compare this Go trace against one real Codex tool call.
 

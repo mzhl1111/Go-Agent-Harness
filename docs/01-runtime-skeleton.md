@@ -40,6 +40,8 @@ runTurn
 
 `ScriptedModel` stands in for a real Responses client. It makes the two model responses explicit, allowing us to focus on harness ownership: the model asks for a tool, the harness executes it, then the harness re-enters the loop with the result available.
 
+The stop hook records its prior decision in `followUpReason`. Hooks run after *every* model response, so using only `len(toolResults) == 1` would request a follow-up forever: the result remains in the turn context on the second pass. This small guard is the first example of an orchestration invariant rather than a tool-executor concern.
+
 ## First reading pass in the upstream source
 
 1. Open `reference/codex/codex-rs/core/src/session/turn.rs` at `run_turn`. Ignore setup and find the loop plus the `needs_follow_up` branch.
