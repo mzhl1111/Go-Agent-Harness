@@ -84,7 +84,13 @@
 - [x] Make the ordered future-drain boundary explicit in `Session`.
 - [x] Verify tool handlers may finish out of order while history and turn events remain in model-item order.
 
-## Planned milestone: 10 — code mode (after direct-runtime foundations)
+## Current milestone: 10 — idempotent tool-call admission
+
+- [x] Admit a completed direct tool call only once per call ID in a turn.
+- [x] Ignore byte-for-byte duplicate delivery without rerunning its executor.
+- [x] Treat reuse of a call ID with changed tool contents as fatal.
+
+## Planned milestone: 11 — code mode (after direct-runtime foundations)
 
 - [ ] Introduce a persistent `Cell` execution abstraction distinct from an agent turn.
 - [ ] Let a cell issue nested tool calls through the existing registry, preserving a `Direct` versus `CodeMode` call source.

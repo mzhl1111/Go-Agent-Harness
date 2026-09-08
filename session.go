@@ -13,6 +13,7 @@ type TurnContext struct {
 	history                  []HistoryItem
 	streamedAssistantText    map[string]string
 	streamedToolInputs       map[string]string
+	admittedToolCalls        map[string]ToolCall
 	lastResponseHadToolCalls bool
 	needsFollowUp            bool
 	followUpReason           string
@@ -47,6 +48,14 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 		s.emit(TurnEvent{Kind: TurnItemCompleted, ItemID: item.ID, Content: item.Text})
 		return OutputItemResult{}
 	}
+	if previous, alreadyAdmitted := turn.admittedToolCalls[call.ID]; alreadyAdmitted {
+		if previous.Name == call.Name && previous.Input == call.Input {
+			s.emit(TurnEvent{Kind: TurnDuplicateTool, CallID: call.ID, Tool: call.Name})
+			return OutputItemResult{}
+		}
+		return OutputItemResult{FatalError: &ItemError{Kind: ItemFatal, Message: "tool call ID was reused with different contents: " + call.ID}}
+	}
+	turn.admittedToolCalls[call.ID] = *call
 	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
 	s.emit(TurnEvent{Kind: TurnItemCompleted, CallID: call.ID, Tool: call.Name, Content: call.Input})
 	future := s.startTool(ctx, *call, false)
@@ -58,6 +67,7 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 		history:               []HistoryItem{{Role: "user", Content: s.initialInput}},
 		streamedAssistantText: make(map[string]string),
 		streamedToolInputs:    make(map[string]string),
+		admittedToolCalls:     make(map[string]ToolCall),
 	}
 	return s.continueTurn(ctx, turn)
 }

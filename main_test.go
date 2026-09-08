@@ -243,6 +243,50 @@ func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
 	}
 }
 
+func TestDuplicateCompletedToolCallIsAdmittedOnlyOnce(t *testing.T) {
+	executor := &countingExecutor{}
+	observer := &recordingTurnObserver{}
+	session := &Session{
+		model: &oneResponseModel{items: []ResponseItem{
+			{Kind: "tool_call", Tool: "count", Input: "once", CallID: "call_once"},
+			{Kind: "tool_call", Tool: "count", Input: "once", CallID: "call_once"},
+		}},
+		tools:    &ToolRegistry{executors: map[string]ToolExecutor{"count": executor}},
+		observer: observer,
+	}
+	turn := session.runTurn(context.Background())
+
+	if got, want := executor.calls, 1; got != want {
+		t.Fatalf("executor calls = %d, want %d", got, want)
+	}
+	if got, want := len(turn.toolResults), 1; got != want {
+		t.Fatalf("tool result count = %d, want %d", got, want)
+	}
+	var duplicateEvents int
+	for _, event := range observer.events {
+		if event.Kind == TurnDuplicateTool && event.CallID == "call_once" {
+			duplicateEvents++
+		}
+	}
+	if got, want := duplicateEvents, 1; got != want {
+		t.Errorf("duplicate-tool events = %d, want %d", got, want)
+	}
+}
+
+func TestReusedToolCallIDWithDifferentContentsIsFatal(t *testing.T) {
+	session := &Session{
+		model: &oneResponseModel{items: []ResponseItem{
+			{Kind: "tool_call", Tool: "count", Input: "first", CallID: "call_collision"},
+			{Kind: "tool_call", Tool: "count", Input: "second", CallID: "call_collision"},
+		}},
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{"count": &countingExecutor{}}},
+	}
+	turn := session.runTurn(context.Background())
+	if turn.fatalError == nil || turn.fatalError.Kind != ItemFatal {
+		t.Fatalf("call ID collision was not fatal: %#v", turn.fatalError)
+	}
+}
+
 func TestToolResultsAreDrainedInModelOrderEvenWhenCompletionIsOutOfOrder(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	executor := outOfOrderExecutor{

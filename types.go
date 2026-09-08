@@ -126,6 +126,7 @@ const (
 	TurnCancelled      TurnEventKind = "cancelled"
 	TurnStreamFailed   TurnEventKind = "stream_failed"
 	TurnFatal          TurnEventKind = "fatal"
+	TurnDuplicateTool  TurnEventKind = "duplicate_tool_ignored"
 	TurnCompleted      TurnEventKind = "completed"
 )
 
