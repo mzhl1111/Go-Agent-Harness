@@ -83,3 +83,10 @@
 
 - [x] Make the ordered future-drain boundary explicit in `Session`.
 - [x] Verify tool handlers may finish out of order while history and turn events remain in model-item order.
+
+## Planned milestone: 10 — code mode (after direct-runtime foundations)
+
+- [ ] Introduce a persistent `Cell` execution abstraction distinct from an agent turn.
+- [ ] Let a cell issue nested tool calls through the existing registry, preserving a `Direct` versus `CodeMode` call source.
+- [ ] Model `yield`, `wait`, completion, and cancellation at the cell boundary.
+- [ ] Compare the teaching design with Codex's code-mode host and its `OpenSession → SubscribeToToolCalls → CompleteToolCall` protocol.

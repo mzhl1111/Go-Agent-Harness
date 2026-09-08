@@ -10,3 +10,19 @@ When we build the streaming `Model` client, compare it with `codex-rs/core/src/s
 - Our current `ToolResult.Retryable` policy is intentionally simpler and must be presented as appropriate only for explicitly idempotent tools.
 
 Revisit this before implementing streaming so the mini harness does not accidentally teach that every tool failure is safe to replay.
+
+## Code mode: a later execution layer
+
+After the direct tool-call harness has covered its remaining core boundaries,
+build a small code-mode layer. Keep the distinction explicit:
+
+```text
+agent turn  → model reasoning and strategic decisions
+code cell   → programmatic local control flow and nested tool calls
+executor    → actual side-effecting tool implementation
+```
+
+The first teaching version should be in-process and deliberately avoid gRPC.
+It needs a persistent cell ID, a `ToolCallSource` (`Direct` or `CodeMode`),
+and a small `yield / wait / complete / cancel` state machine. Only after that
+should we compare it with Codex's separate code-mode host and callback protocol.
