@@ -61,6 +61,24 @@ type recordingObserver struct {
 	events []DispatchEvent
 }
 
+type recordingTurnObserver struct {
+	events []TurnEvent
+}
+
+func (o *recordingTurnObserver) OnTurn(event TurnEvent) {
+	o.events = append(o.events, event)
+}
+
+func (o *recordingTurnObserver) contents(kind TurnEventKind) []string {
+	var contents []string
+	for _, event := range o.events {
+		if event.Kind == kind {
+			contents = append(contents, event.Content)
+		}
+	}
+	return contents
+}
+
 func (o *recordingObserver) OnDispatch(event DispatchEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -286,11 +304,11 @@ func TestApprovedCallResumesWithoutReplayingTheOriginalResponse(t *testing.T) {
 
 func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 	model := &historyRecordingModel{}
-	var deltas []string
+	observer := &recordingTurnObserver{}
 	session := &Session{
 		model:        model,
 		initialInput: "test task",
-		onTextDelta:  func(_ string, delta string) { deltas = append(deltas, delta) },
+		observer:     observer,
 		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
 	}
 	session.runTurn(context.Background())
@@ -312,7 +330,7 @@ func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 	if !strings.HasSuffix(toolOutput.Content, "...") {
 		t.Errorf("truncated output = %q, want truncation marker", toolOutput.Content)
 	}
-	if got, want := strings.Join(deltas, ""), "draft text"; got != want {
+	if got, want := strings.Join(observer.contents(TurnTextDelta), ""), "draft text"; got != want {
 		t.Errorf("streamed deltas = %q, want %q", got, want)
 	}
 	for _, item := range secondInput {
@@ -450,17 +468,21 @@ func TestSessionDoesNotRetryStreamAfterCompletedToolItem(t *testing.T) {
 
 func TestToolInputDeltasAreAssembledOnlyWhenItemCompletes(t *testing.T) {
 	executor := &inputRecordingExecutor{}
-	var deltas []string
+	observer := &recordingTurnObserver{}
 	session := &Session{
-		model: &toolInputDeltaModel{},
-		tools: &ToolRegistry{executors: map[string]ToolExecutor{"exec": executor}},
-		onToolInputDelta: func(callID, delta string) {
-			deltas = append(deltas, callID+":"+delta)
-		},
+		model:    &toolInputDeltaModel{},
+		tools:    &ToolRegistry{executors: map[string]ToolExecutor{"exec": executor}},
+		observer: observer,
 	}
 	turn := session.runTurn(context.Background())
 	if got, want := executor.input, "echo assembled"; got != want {
 		t.Fatalf("executor input = %q, want %q", got, want)
+	}
+	var deltas []string
+	for _, event := range observer.events {
+		if event.Kind == TurnToolInputDelta {
+			deltas = append(deltas, event.CallID+":"+event.Content)
+		}
 	}
 	if got, want := strings.Join(deltas, ","), "call_delta:echo ,call_delta:assembled"; got != want {
 		t.Errorf("observed input deltas = %q, want %q", got, want)
@@ -471,14 +493,18 @@ func TestToolInputDeltasAreAssembledOnlyWhenItemCompletes(t *testing.T) {
 }
 
 func TestAssistantTextDeltasAreCommittedOnlyWhenItemCompletes(t *testing.T) {
-	var observed []string
+	observer := &recordingTurnObserver{}
 	session := &Session{
-		model: streamedTextModel{},
-		onTextDelta: func(itemID, delta string) {
-			observed = append(observed, itemID+":"+delta)
-		},
+		model:    streamedTextModel{},
+		observer: observer,
 	}
 	turn := session.runTurn(context.Background())
+	var observed []string
+	for _, event := range observer.events {
+		if event.Kind == TurnTextDelta {
+			observed = append(observed, event.ItemID+":"+event.Content)
+		}
+	}
 	if got, want := strings.Join(observed, ","), "message_1:Hello, ,message_1:streaming world."; got != want {
 		t.Errorf("observed deltas = %q, want %q", got, want)
 	}

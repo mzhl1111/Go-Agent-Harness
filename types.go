@@ -101,3 +101,36 @@ type DispatchEvent struct {
 type DispatchObserver interface {
 	OnDispatch(DispatchEvent)
 }
+
+// TurnEvent is the session-level projection of runtime progress. It is not
+// model history: observers may render or record it without changing the next
+// model request.
+type TurnEvent struct {
+	Kind    TurnEventKind
+	ItemID  string
+	CallID  string
+	Tool    string
+	Content string
+	Message string
+}
+
+type TurnEventKind string
+
+const (
+	TurnTextDelta      TurnEventKind = "text_delta"
+	TurnToolInputDelta TurnEventKind = "tool_input_delta"
+	TurnItemCompleted  TurnEventKind = "item_completed"
+	TurnToolResult     TurnEventKind = "tool_result"
+	TurnApprovalNeeded TurnEventKind = "approval_needed"
+	TurnFollowUp       TurnEventKind = "follow_up"
+	TurnCancelled      TurnEventKind = "cancelled"
+	TurnStreamFailed   TurnEventKind = "stream_failed"
+	TurnFatal          TurnEventKind = "fatal"
+	TurnCompleted      TurnEventKind = "completed"
+)
+
+// TurnObserver receives events from the session goroutine in turn order.
+// Unlike DispatchObserver, it is not called from tool-future goroutines.
+type TurnObserver interface {
+	OnTurn(TurnEvent)
+}

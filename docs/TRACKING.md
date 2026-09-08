@@ -72,3 +72,9 @@
 - [x] Drain every started tool future after parent-context cancellation.
 - [x] Stop the turn before a cancellation can trigger a model follow-up.
 - [x] Preserve the cancelled tool result in history for inspection.
+
+## Current milestone: 8 — session events
+
+- [x] Replace session-local printing and delta callbacks with a unified `TurnObserver`.
+- [x] Keep runtime events separate from durable model history.
+- [x] Demonstrate a replaceable CLI observer and test event delivery.

@@ -21,6 +21,7 @@ The program intentionally supports only `echo ...`, making each run deterministi
 5. Cancellation, retries and observability. *(implemented)*
 6. Streaming model output. *(implemented, including safe pre-item transport retries)*
 7. Turn cancellation ownership. *(implemented: drain started tools, then stop before follow-up)*
+8. Session event projection. *(implemented: replaceable CLI/UI/telemetry observer)*
 
 See [the tracking checklist](docs/TRACKING.md) for the current state.
 

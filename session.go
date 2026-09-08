@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -25,14 +24,13 @@ type TurnContext struct {
 type StopHook func(*TurnContext)
 
 type Session struct {
-	model            Model
-	tools            *ToolRegistry
-	stopHooks        []StopHook
-	initialInput     string
-	toolTimeout      time.Duration
-	streamRetry      RetryPolicy
-	onTextDelta      func(itemID, delta string)
-	onToolInputDelta func(callID, delta string)
+	model        Model
+	tools        *ToolRegistry
+	stopHooks    []StopHook
+	initialInput string
+	toolTimeout  time.Duration
+	streamRetry  RetryPolicy
+	observer     TurnObserver
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
@@ -46,10 +44,11 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 	}
 	if call == nil {
 		turn.history = append(turn.history, HistoryItem{Role: "assistant", Content: item.Text})
-		fmt.Println("assistant:", item.Text)
+		s.emit(TurnEvent{Kind: TurnItemCompleted, ItemID: item.ID, Content: item.Text})
 		return OutputItemResult{}
 	}
 	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
+	s.emit(TurnEvent{Kind: TurnItemCompleted, CallID: call.ID, Tool: call.Name, Content: call.Input})
 	future := s.startTool(ctx, *call, false)
 	return OutputItemResult{ToolFuture: &future, NeedsFollowUp: true}
 }
@@ -76,26 +75,29 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			if outcome.Approval != nil {
 				turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
 				turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
-				fmt.Printf("approval required (%s): %s\n", outcome.Approval.CallID, outcome.Approval.Reason)
+				s.emit(TurnEvent{Kind: TurnApprovalNeeded, CallID: outcome.Approval.CallID, Tool: outcome.Approval.Tool, Message: outcome.Approval.Reason})
 				continue
 			}
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
 			turn.recordToolResult(*outcome.Result)
-			fmt.Printf("tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
+			s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Content: outcome.Result.Output})
 		}
 		// The parent context owns this complete turn, including every future it
 		// started. We first drain those futures so their cancellation outcomes are
 		// recorded, then stop before asking the model for another response.
 		if err := ctx.Err(); err != nil {
 			turn.cancellationErr = err
+			s.emit(TurnEvent{Kind: TurnCancelled, Message: err.Error()})
 			return turn
 		}
 		if streamFailure != nil {
 			turn.streamFailure = streamFailure
+			s.emit(TurnEvent{Kind: TurnStreamFailed, Message: streamFailure.Message})
 			return turn
 		}
 		if fatalError != nil {
 			turn.fatalError = fatalError
+			s.emit(TurnEvent{Kind: TurnFatal, Message: fatalError.Message})
 			return turn
 		}
 		for _, hook := range s.stopHooks {
@@ -106,10 +108,11 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			return turn                // The UI can now render approval requests and wait for a user decision.
 		}
 		if turn.needsFollowUp {
-			fmt.Println("follow-up requested:", turn.followUpReason)
+			s.emit(TurnEvent{Kind: TurnFollowUp, Message: turn.followUpReason})
 			turn.needsFollowUp = false
 			continue
 		}
+		s.emit(TurnEvent{Kind: TurnCompleted})
 		return turn
 	}
 }
@@ -132,14 +135,10 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 			switch event.Kind {
 			case ModelTextDelta:
 				turn.streamedAssistantText[event.ItemID] += event.Delta
-				if s.onTextDelta != nil {
-					s.onTextDelta(event.ItemID, event.Delta)
-				}
+				s.emit(TurnEvent{Kind: TurnTextDelta, ItemID: event.ItemID, Content: event.Delta})
 			case ModelToolInputDelta:
 				turn.streamedToolInputs[event.CallID] += event.Delta
-				if s.onToolInputDelta != nil {
-					s.onToolInputDelta(event.CallID, event.Delta)
-				}
+				s.emit(TurnEvent{Kind: TurnToolInputDelta, CallID: event.CallID, Content: event.Delta})
 			case ModelOutputItemDone:
 				completedItems++
 				item := turn.finalizeStreamedAssistantText(event.Item)
@@ -221,11 +220,17 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 		if outcome.Result != nil {
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
 			turn.recordToolResult(*outcome.Result)
-			fmt.Printf("approved tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
+			s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Content: outcome.Result.Output})
 		}
 		return s.continueTurn(ctx, turn)
 	}
 	return turn
+}
+
+func (s *Session) emit(event TurnEvent) {
+	if s.observer != nil {
+		s.observer.OnTurn(event)
+	}
 }
 
 func (s *Session) startTool(ctx context.Context, call ToolCall, approvalGranted bool) ToolFuture {
