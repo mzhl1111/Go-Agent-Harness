@@ -9,6 +9,8 @@ import (
 // an "echo" command; it knows nothing about turns or model responses.
 type ExecCommandHandler struct{}
 
+func (ExecCommandHandler) SupportsParallelToolCalls() bool { return true }
+
 func (ExecCommandHandler) Handle(_ context.Context, input string) ToolResult {
 	parts := strings.Fields(input)
 	if len(parts) == 0 || parts[0] != "echo" {

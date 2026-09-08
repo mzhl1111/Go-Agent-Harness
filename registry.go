@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -23,11 +24,13 @@ type PostHook func(ToolCall, ToolResult)
 
 // ToolRegistry is the orchestration boundary around reusable executors.
 type ToolRegistry struct {
-	executors map[string]ToolExecutor
-	pre       []PreHook
-	post      []PostHook
-	retry     RetryPolicy
-	observer  DispatchObserver
+	executors   map[string]ToolExecutor
+	pre         []PreHook
+	post        []PostHook
+	retry       RetryPolicy
+	observer    DispatchObserver
+	serialMu    sync.Mutex
+	serialGates map[string]chan struct{}
 }
 
 func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall, approvalGranted bool) ToolDispatchOutcome {
@@ -93,13 +96,52 @@ func (r *ToolRegistry) emit(event DispatchEvent) {
 }
 
 func (r *ToolRegistry) Start(ctx context.Context, call ToolCall) ToolFuture {
-	result := make(chan ToolDispatchOutcome, 1)
-	go func() { result <- r.dispatchAnyWithTerminalOutcome(ctx, call, false) }()
-	return ToolFuture{call: call, result: result}
+	return r.start(ctx, call, false)
 }
 
 func (r *ToolRegistry) StartAfterApproval(ctx context.Context, call ToolCall) ToolFuture {
+	return r.start(ctx, call, true)
+}
+
+func (r *ToolRegistry) start(ctx context.Context, call ToolCall, approvalGranted bool) ToolFuture {
 	result := make(chan ToolDispatchOutcome, 1)
-	go func() { result <- r.dispatchAnyWithTerminalOutcome(ctx, call, true) }()
+	go func() {
+		if !r.supportsParallelToolCalls(call.Name) {
+			gate := r.serialGate(call.Name)
+			select {
+			case gate <- struct{}{}:
+				defer func() { <-gate }()
+			case <-ctx.Done():
+				failure := ToolResult{CallID: call.ID, IsError: true, Output: ctx.Err().Error()}
+				r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Message: failure.Output})
+				result <- ToolDispatchOutcome{Result: &failure}
+				return
+			}
+		}
+		result <- r.dispatchAnyWithTerminalOutcome(ctx, call, approvalGranted)
+	}()
 	return ToolFuture{call: call, result: result}
+}
+
+func (r *ToolRegistry) supportsParallelToolCalls(name string) bool {
+	executor, ok := r.executors[name]
+	if !ok {
+		return false
+	}
+	parallel, ok := executor.(ParallelToolExecutor)
+	return ok && parallel.SupportsParallelToolCalls()
+}
+
+func (r *ToolRegistry) serialGate(name string) chan struct{} {
+	r.serialMu.Lock()
+	defer r.serialMu.Unlock()
+	if r.serialGates == nil {
+		r.serialGates = make(map[string]chan struct{})
+	}
+	if gate, ok := r.serialGates[name]; ok {
+		return gate
+	}
+	gate := make(chan struct{}, 1)
+	r.serialGates[name] = gate
+	return gate
 }

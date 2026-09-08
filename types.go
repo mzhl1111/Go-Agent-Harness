@@ -50,6 +50,13 @@ type ToolExecutor interface {
 	Handle(context.Context, string) ToolResult
 }
 
+// ParallelToolExecutor is an opt-in capability. Executors that do not
+// implement it are serialized by tool name.
+type ParallelToolExecutor interface {
+	ToolExecutor
+	SupportsParallelToolCalls() bool
+}
+
 // ToolFuture represents a started tool call whose result will be available later.
 type ToolFuture struct {
 	call   ToolCall

@@ -11,7 +11,7 @@ The mini harness is now split by runtime responsibility instead of by the order 
 | `session.go` | Turn loop, completed-item outcomes, history, follow-up, pause/resume, timeouts and temporary streamed text/argument buffers | Tool-specific behavior or wire-protocol decoding |
 | `retry.go` | Shared bounded-retry configuration | Model or tool behavior |
 | `router.go` | Completed-item validation and ToolCall construction | Dispatch or tool execution |
-| `registry.go` | Pre-hook, retries, dispatch events, futures, post-hook | Model loop or history |
+| `registry.go` | Pre-hook, retries, parallelism gates, dispatch events, futures, post-hook | Model loop or history |
 | `executor.go` | The safe `echo` executor | Approval, hooks or turn state |
 
 ```text

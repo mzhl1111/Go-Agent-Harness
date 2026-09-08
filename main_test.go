@@ -13,6 +13,19 @@ type blockingExecutor struct {
 	release <-chan struct{}
 }
 
+func (blockingExecutor) SupportsParallelToolCalls() bool { return true }
+
+type serialBlockingExecutor struct {
+	started chan string
+	release <-chan struct{}
+}
+
+func (e serialBlockingExecutor) Handle(_ context.Context, input string) ToolResult {
+	e.started <- input
+	<-e.release
+	return ToolResult{Output: input}
+}
+
 type countingExecutor struct{ calls int }
 
 type contextWaitingExecutor struct{}
@@ -180,6 +193,26 @@ func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
 	if got, want := turn.toolResults[1].CallID, "call_2"; got != want {
 		t.Errorf("second result CallID = %q, want %q", got, want)
 	}
+}
+
+func TestToolCallsDefaultToSerialExecutionWhenExecutorDoesNotOptIn(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan string, 2)
+	registry := &ToolRegistry{executors: map[string]ToolExecutor{
+		"serial": serialBlockingExecutor{started: started, release: release},
+	}}
+	first := registry.Start(context.Background(), ToolCall{Name: "serial", Input: "first", ID: "call_1"})
+	<-started
+	second := registry.Start(context.Background(), ToolCall{Name: "serial", Input: "second", ID: "call_2"})
+	select {
+	case call := <-started:
+		t.Fatalf("second serial call started before first completed: %q", call)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-started // The second handler can start only after the first releases the gate.
+	<-first.result
+	<-second.result
 }
 
 func TestUnknownToolProducesCallAssociatedError(t *testing.T) {
