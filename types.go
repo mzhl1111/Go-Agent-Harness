@@ -44,6 +44,12 @@ type ToolFuture struct {
 	cancel func()
 }
 
+// OutputItemResult reports the runtime consequences of one completed model item.
+type OutputItemResult struct {
+	ToolFuture    *ToolFuture
+	NeedsFollowUp bool
+}
+
 // ToolDispatchOutcome makes "do not run the handler" explicit.
 type ToolDispatchOutcome struct {
 	Result   *ToolResult

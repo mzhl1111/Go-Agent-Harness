@@ -32,16 +32,16 @@ type Session struct {
 	onToolInputDelta func(callID, delta string)
 }
 
-func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) *ToolFuture {
+func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
 	if item.Kind == "text" {
 		turn.history = append(turn.history, HistoryItem{Role: "assistant", Content: item.Text})
 		fmt.Println("assistant:", item.Text)
-		return nil
+		return OutputItemResult{}
 	}
 	call := ToolCall{Name: item.Tool, Input: item.Input, ID: item.CallID}
 	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
 	future := s.startTool(ctx, call, false)
-	return &future
+	return OutputItemResult{ToolFuture: &future, NeedsFollowUp: true}
 }
 
 func (s *Session) runTurn(ctx context.Context) *TurnContext {
@@ -54,8 +54,9 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
-		toolFutures, streamFailure := s.streamResponse(ctx, turn)
+		toolFutures, needsFollowUp, streamFailure := s.streamResponse(ctx, turn)
 		turn.lastResponseHadToolCalls = len(toolFutures) > 0
+		turn.needsFollowUp = turn.needsFollowUp || needsFollowUp
 		for _, future := range toolFutures {
 			outcome := <-future.result
 			if future.cancel != nil {
@@ -79,10 +80,11 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			hook(turn)
 		}
 		if len(turn.pendingApprovals) > 0 {
-			return turn // The UI can now render approval requests and wait for a user decision.
+			turn.needsFollowUp = false // Approval resume itself will request the next model response.
+			return turn                // The UI can now render approval requests and wait for a user decision.
 		}
 		if turn.needsFollowUp {
-			fmt.Println("stop hook requested follow-up:", turn.followUpReason)
+			fmt.Println("follow-up requested:", turn.followUpReason)
 			turn.needsFollowUp = false
 			continue
 		}
@@ -90,7 +92,7 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 	}
 }
 
-func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*ToolFuture, *StreamFailure) {
+func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*ToolFuture, bool, *StreamFailure) {
 	maxAttempts := s.streamRetry.MaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -98,6 +100,7 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 	for attempt := 1; ; attempt++ {
 		stream := s.model.Stream(ctx, turn.modelInput())
 		var toolFutures []*ToolFuture
+		needsFollowUp := false
 		completedItems := 0
 		for event := range stream.Events {
 			switch event.Kind {
@@ -113,27 +116,29 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 			case ModelOutputItemDone:
 				completedItems++
 				item := turn.finalizeStreamedToolInput(event.Item)
-				if future := s.handleOutputItemDone(ctx, turn, item); future != nil {
-					toolFutures = append(toolFutures, future)
+				output := s.handleOutputItemDone(ctx, turn, item)
+				needsFollowUp = needsFollowUp || output.NeedsFollowUp
+				if output.ToolFuture != nil {
+					toolFutures = append(toolFutures, output.ToolFuture)
 				}
 			}
 		}
 		failure := <-stream.Err
 		if failure == nil {
-			return toolFutures, nil
+			return toolFutures, needsFollowUp, nil
 		}
 		// Replaying a stream after a completed item could duplicate an already
 		// executed side effect. Production Codex has richer history recovery;
 		// this teaching version retries only before a semantic item is complete.
 		if !failure.Retryable || completedItems > 0 || attempt == maxAttempts {
-			return toolFutures, failure
+			return toolFutures, needsFollowUp, failure
 		}
 		if s.streamRetry.Backoff > 0 {
 			timer := time.NewTimer(s.streamRetry.Backoff)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return toolFutures, &StreamFailure{Message: ctx.Err().Error()}
+				return toolFutures, needsFollowUp, &StreamFailure{Message: ctx.Err().Error()}
 			case <-timer.C:
 			}
 		}

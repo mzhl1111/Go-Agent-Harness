@@ -77,9 +77,16 @@ func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 	return ToolResult{Output: input}
 }
 
-type oneResponseModel struct{ items []ResponseItem }
+type oneResponseModel struct {
+	items []ResponseItem
+	sent  bool
+}
 
-func (m oneResponseModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+func (m *oneResponseModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	if m.sent {
+		return modelEventStream(ctx)
+	}
+	m.sent = true
 	events := make([]ModelEvent, 0, len(m.items))
 	for _, item := range m.items {
 		events = append(events, ModelEvent{Kind: ModelOutputItemDone, Item: item})
@@ -109,9 +116,13 @@ type flakyStreamModel struct {
 	failAfterToolCall bool
 }
 
-type toolInputDeltaModel struct{}
+type toolInputDeltaModel struct{ sent bool }
 
-func (toolInputDeltaModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+func (m *toolInputDeltaModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	if m.sent {
+		return modelEventStream(ctx)
+	}
+	m.sent = true
 	return modelEventStream(ctx,
 		ModelEvent{Kind: ModelToolInputDelta, CallID: "call_delta", Delta: "echo "},
 		ModelEvent{Kind: ModelToolInputDelta, CallID: "call_delta", Delta: "assembled"},
@@ -136,7 +147,7 @@ func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan string, 2)
 	session := &Session{
-		model: oneResponseModel{items: []ResponseItem{
+		model: &oneResponseModel{items: []ResponseItem{
 			{Kind: "tool_call", Tool: "block", Input: "first", CallID: "call_1"},
 			{Kind: "tool_call", Tool: "block", Input: "second", CallID: "call_2"},
 		}},
@@ -226,11 +237,6 @@ func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 		initialInput: "test task",
 		onTextDelta:  func(delta string) { deltas = append(deltas, delta) },
 		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
-		stopHooks: []StopHook{func(turn *TurnContext) {
-			if turn.lastResponseHadToolCalls && len(turn.toolResults) == 1 && turn.followUpReason == "" {
-				turn.needsFollowUp, turn.followUpReason = true, "return tool output to model"
-			}
-		}},
 	}
 	session.runTurn(context.Background())
 
@@ -263,7 +269,7 @@ func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 
 func TestSessionToolTimeoutCancelsContextAwareExecutor(t *testing.T) {
 	session := &Session{
-		model:       oneResponseModel{items: []ResponseItem{{Kind: "tool_call", Tool: "wait", CallID: "call_timeout"}}},
+		model:       &oneResponseModel{items: []ResponseItem{{Kind: "tool_call", Tool: "wait", CallID: "call_timeout"}}},
 		tools:       &ToolRegistry{executors: map[string]ToolExecutor{"wait": contextWaitingExecutor{}}},
 		toolTimeout: 10 * time.Millisecond,
 	}
@@ -362,7 +368,7 @@ func TestToolInputDeltasAreAssembledOnlyWhenItemCompletes(t *testing.T) {
 	executor := &inputRecordingExecutor{}
 	var deltas []string
 	session := &Session{
-		model: toolInputDeltaModel{},
+		model: &toolInputDeltaModel{},
 		tools: &ToolRegistry{executors: map[string]ToolExecutor{"exec": executor}},
 		onToolInputDelta: func(callID, delta string) {
 			deltas = append(deltas, callID+":"+delta)

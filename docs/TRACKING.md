@@ -62,3 +62,4 @@
 - [x] Route only completed output items into tool dispatch.
 - [x] Add stream transport errors and move general retry to the model-stream layer.
 - [x] Buffer streamed tool-input deltas by call ID until the output item completes.
+- [x] Derive follow-up from completed tool items instead of demo-specific stop-hook logic.

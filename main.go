@@ -17,17 +17,9 @@ func main() {
 		}},
 		post: []PostHook{func(c ToolCall, r ToolResult) { fmt.Println("post hook:", c.ID, "error=", r.IsError) }},
 	}
-	session := &Session{model: &ScriptedModel{}, tools: tools, initialInput: "Run the demo tools.",
-		stopHooks: []StopHook{requestFollowUpAfterAllTools},
-	}
+	session := &Session{model: &ScriptedModel{}, tools: tools, initialInput: "Run the demo tools."}
 	turn := session.runTurn(context.Background())
 	if len(turn.pendingApprovals) > 0 {
 		session.resumeApproved(context.Background(), turn, turn.pendingApprovals[0].CallID)
-	}
-}
-
-func requestFollowUpAfterAllTools(turn *TurnContext) {
-	if turn.lastResponseHadToolCalls && len(turn.toolResults) == 2 && len(turn.pendingApprovals) == 0 && turn.followUpReason == "" {
-		turn.needsFollowUp, turn.followUpReason = true, "send tool result back to model"
 	}
 }
