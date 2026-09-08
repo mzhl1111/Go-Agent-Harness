@@ -273,6 +273,28 @@ func TestDuplicateCompletedToolCallIsAdmittedOnlyOnce(t *testing.T) {
 	}
 }
 
+func TestDirectModelToolCallKeepsDirectSourceThroughResultAndEvent(t *testing.T) {
+	observer := &recordingTurnObserver{}
+	session := &Session{
+		model:    &oneResponseModel{items: []ResponseItem{{Kind: "tool_call", Tool: "count", CallID: "call_source"}}},
+		tools:    &ToolRegistry{executors: map[string]ToolExecutor{"count": &countingExecutor{}}},
+		observer: observer,
+	}
+	turn := session.runTurn(context.Background())
+	if got, want := turn.toolResults[0].Source.Kind, ToolCallDirect; got != want {
+		t.Fatalf("result source = %q, want %q", got, want)
+	}
+	for _, event := range observer.events {
+		if event.Kind == TurnToolResult && event.CallID == "call_source" {
+			if got, want := event.Source.Kind, ToolCallDirect; got != want {
+				t.Errorf("event source = %q, want %q", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("missing tool-result event")
+}
+
 func TestReusedToolCallIDWithDifferentContentsIsFatal(t *testing.T) {
 	session := &Session{
 		model: &oneResponseModel{items: []ResponseItem{
@@ -389,6 +411,9 @@ func TestApprovedCallResumesWithoutReplayingTheOriginalResponse(t *testing.T) {
 	turn := session.runTurn(context.Background())
 	if model.responseNumber != 1 || len(turn.pendingApprovals) != 1 || executor.calls != 1 {
 		t.Fatalf("turn did not suspend as expected: responses=%d approvals=%d calls=%d", model.responseNumber, len(turn.pendingApprovals), executor.calls)
+	}
+	if got, want := turn.pendingApprovals[0].Source.Kind, ToolCallDirect; got != want {
+		t.Fatalf("approval source = %q, want %q", got, want)
 	}
 
 	turn = session.resumeApproved(context.Background(), turn, "call_2")

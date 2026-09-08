@@ -34,26 +34,26 @@ type ToolRegistry struct {
 }
 
 func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall, approvalGranted bool) ToolDispatchOutcome {
-	r.emit(DispatchEvent{Kind: DispatchStarted, CallID: call.ID, Tool: call.Name})
+	r.emit(DispatchEvent{Kind: DispatchStarted, CallID: call.ID, Tool: call.Name, Source: call.Source})
 	for _, hook := range r.pre {
 		switch outcome := hook(call); outcome.Decision {
 		case PreHookBlocked:
-			r.emit(DispatchEvent{Kind: DispatchBlocked, CallID: call.ID, Tool: call.Name, Message: outcome.Reason})
-			return ToolDispatchOutcome{Result: &ToolResult{CallID: call.ID, IsError: true, Output: outcome.Reason}}
+			r.emit(DispatchEvent{Kind: DispatchBlocked, CallID: call.ID, Tool: call.Name, Source: call.Source, Message: outcome.Reason})
+			return ToolDispatchOutcome{Result: &ToolResult{CallID: call.ID, Source: call.Source, IsError: true, Output: outcome.Reason}}
 		case PreHookNeedsApproval:
 			if approvalGranted {
 				continue
 			}
-			r.emit(DispatchEvent{Kind: DispatchWaitingApproval, CallID: call.ID, Tool: call.Name, Message: outcome.Reason})
+			r.emit(DispatchEvent{Kind: DispatchWaitingApproval, CallID: call.ID, Tool: call.Name, Source: call.Source, Message: outcome.Reason})
 			return ToolDispatchOutcome{Approval: &ApprovalRequest{
-				CallID: call.ID, Tool: call.Name, Input: call.Input, Reason: outcome.Reason,
+				CallID: call.ID, Tool: call.Name, Input: call.Input, Reason: outcome.Reason, Source: call.Source,
 			}}
 		}
 	}
 	executor, ok := r.executors[call.Name]
 	if !ok {
-		result := ToolResult{CallID: call.ID, IsError: true, Output: "unknown tool: " + call.Name}
-		r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Message: result.Output})
+		result := ToolResult{CallID: call.ID, Source: call.Source, IsError: true, Output: "unknown tool: " + call.Name}
+		r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Source: call.Source, Message: result.Output})
 		return ToolDispatchOutcome{Result: &result}
 	}
 	maxAttempts := r.retry.MaxAttempts
@@ -62,7 +62,7 @@ func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call 
 	}
 	for attempt := 1; ; attempt++ {
 		result := executor.Handle(ctx, call.Input)
-		result.CallID, result.Attempts = call.ID, attempt
+		result.CallID, result.Source, result.Attempts = call.ID, call.Source, attempt
 		if !result.IsError || !result.Retryable || attempt == maxAttempts {
 			for _, hook := range r.post {
 				hook(call, result)
@@ -71,17 +71,17 @@ func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call 
 			if result.IsError {
 				kind = DispatchFailed
 			}
-			r.emit(DispatchEvent{Kind: kind, CallID: call.ID, Tool: call.Name, Attempt: attempt, Message: result.Output})
+			r.emit(DispatchEvent{Kind: kind, CallID: call.ID, Tool: call.Name, Source: call.Source, Attempt: attempt, Message: result.Output})
 			return ToolDispatchOutcome{Result: &result}
 		}
-		r.emit(DispatchEvent{Kind: DispatchRetrying, CallID: call.ID, Tool: call.Name, Attempt: attempt, Message: result.Output})
+		r.emit(DispatchEvent{Kind: DispatchRetrying, CallID: call.ID, Tool: call.Name, Source: call.Source, Attempt: attempt, Message: result.Output})
 		if r.retry.Backoff > 0 {
 			timer := time.NewTimer(r.retry.Backoff)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				result := ToolResult{CallID: call.ID, IsError: true, Output: ctx.Err().Error(), Attempts: attempt}
-				r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Attempt: attempt, Message: result.Output})
+				result := ToolResult{CallID: call.ID, Source: call.Source, IsError: true, Output: ctx.Err().Error(), Attempts: attempt}
+				r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Source: call.Source, Attempt: attempt, Message: result.Output})
 				return ToolDispatchOutcome{Result: &result}
 			case <-timer.C:
 			}
@@ -104,6 +104,7 @@ func (r *ToolRegistry) StartAfterApproval(ctx context.Context, call ToolCall) To
 }
 
 func (r *ToolRegistry) start(ctx context.Context, call ToolCall, approvalGranted bool) ToolFuture {
+	call.Source = call.Source.normalized()
 	result := make(chan ToolDispatchOutcome, 1)
 	go func() {
 		if !r.supportsParallelToolCalls(call.Name) {
@@ -112,8 +113,8 @@ func (r *ToolRegistry) start(ctx context.Context, call ToolCall, approvalGranted
 			case gate <- struct{}{}:
 				defer func() { <-gate }()
 			case <-ctx.Done():
-				failure := ToolResult{CallID: call.ID, IsError: true, Output: ctx.Err().Error()}
-				r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Message: failure.Output})
+				failure := ToolResult{CallID: call.ID, Source: call.Source, IsError: true, Output: ctx.Err().Error()}
+				r.emit(DispatchEvent{Kind: DispatchFailed, CallID: call.ID, Tool: call.Name, Source: call.Source, Message: failure.Output})
 				result <- ToolDispatchOutcome{Result: &failure}
 				return
 			}

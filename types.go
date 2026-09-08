@@ -14,6 +14,7 @@ type ResponseItem struct {
 
 type ToolResult struct {
 	CallID    string
+	Source    ToolCallSource
 	Output    string
 	IsError   bool
 	Retryable bool
@@ -26,6 +27,33 @@ type HistoryItem struct {
 
 type ToolCall struct {
 	Name, Input, ID string
+	Source          ToolCallSource
+}
+
+// ToolCallSource identifies whether the model invoked a tool directly or a
+// future code-mode cell invoked it as a nested operation.
+type ToolCallSource struct {
+	Kind              ToolCallSourceKind
+	CellID            string
+	RuntimeToolCallID string
+}
+
+type ToolCallSourceKind string
+
+const (
+	ToolCallDirect   ToolCallSourceKind = "direct"
+	ToolCallCodeMode ToolCallSourceKind = "code_mode"
+)
+
+func (source ToolCallSource) normalized() ToolCallSource {
+	if source.Kind == "" {
+		source.Kind = ToolCallDirect
+	}
+	return source
+}
+
+func (source ToolCallSource) sameAs(other ToolCallSource) bool {
+	return source.normalized() == other.normalized()
 }
 
 type ItemErrorKind string
@@ -42,6 +70,7 @@ type ItemError struct {
 
 type ApprovalRequest struct {
 	CallID, Tool, Input, Reason string
+	Source                      ToolCallSource
 }
 
 // ToolExecutor is the reusable tool contract (like codex-tools).
@@ -92,6 +121,7 @@ type DispatchEvent struct {
 	Kind    DispatchEventKind
 	CallID  string
 	Tool    string
+	Source  ToolCallSource
 	Attempt int
 	Message string
 }
@@ -110,6 +140,7 @@ type TurnEvent struct {
 	ItemID  string
 	CallID  string
 	Tool    string
+	Source  ToolCallSource
 	Content string
 	Message string
 }

@@ -49,15 +49,15 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 		return OutputItemResult{}
 	}
 	if previous, alreadyAdmitted := turn.admittedToolCalls[call.ID]; alreadyAdmitted {
-		if previous.Name == call.Name && previous.Input == call.Input {
-			s.emit(TurnEvent{Kind: TurnDuplicateTool, CallID: call.ID, Tool: call.Name})
+		if previous.Name == call.Name && previous.Input == call.Input && previous.Source.sameAs(call.Source) {
+			s.emit(TurnEvent{Kind: TurnDuplicateTool, CallID: call.ID, Tool: call.Name, Source: call.Source})
 			return OutputItemResult{}
 		}
 		return OutputItemResult{FatalError: &ItemError{Kind: ItemFatal, Message: "tool call ID was reused with different contents: " + call.ID}}
 	}
 	turn.admittedToolCalls[call.ID] = *call
 	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
-	s.emit(TurnEvent{Kind: TurnItemCompleted, CallID: call.ID, Tool: call.Name, Content: call.Input})
+	s.emit(TurnEvent{Kind: TurnItemCompleted, CallID: call.ID, Tool: call.Name, Source: call.Source, Content: call.Input})
 	future := s.startTool(ctx, *call, false)
 	return OutputItemResult{ToolFuture: &future, NeedsFollowUp: true}
 }
@@ -125,12 +125,12 @@ func (s *Session) drainToolFutures(turn *TurnContext, toolFutures []*ToolFuture)
 		if outcome.Approval != nil {
 			turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
 			turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
-			s.emit(TurnEvent{Kind: TurnApprovalNeeded, CallID: outcome.Approval.CallID, Tool: outcome.Approval.Tool, Message: outcome.Approval.Reason})
+			s.emit(TurnEvent{Kind: TurnApprovalNeeded, CallID: outcome.Approval.CallID, Tool: outcome.Approval.Tool, Source: outcome.Approval.Source, Message: outcome.Approval.Reason})
 			continue
 		}
 		turn.toolResults = append(turn.toolResults, *outcome.Result)
 		turn.recordToolResult(*outcome.Result)
-		s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Content: outcome.Result.Output})
+		s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Source: outcome.Result.Source, Content: outcome.Result.Output})
 	}
 }
 
@@ -227,7 +227,7 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 		if request.CallID != callID {
 			continue
 		}
-		call := ToolCall{Name: request.Tool, Input: request.Input, ID: request.CallID}
+		call := ToolCall{Name: request.Tool, Input: request.Input, ID: request.CallID, Source: request.Source}
 		future := s.startTool(ctx, call, true)
 		outcome := <-future.result
 		if future.cancel != nil {
@@ -237,7 +237,7 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 		if outcome.Result != nil {
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
 			turn.recordToolResult(*outcome.Result)
-			s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Content: outcome.Result.Output})
+			s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Source: outcome.Result.Source, Content: outcome.Result.Output})
 		}
 		return s.continueTurn(ctx, turn)
 	}
