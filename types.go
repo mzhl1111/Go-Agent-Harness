@@ -4,6 +4,7 @@ import "context"
 
 // ResponseItem is the small subset of a model response that our harness needs.
 type ResponseItem struct {
+	ID     string
 	Kind   string // "text" or "tool_call"
 	Text   string
 	Tool   string

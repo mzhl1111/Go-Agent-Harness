@@ -18,7 +18,8 @@ func (m *ScriptedModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream
 		)
 	}
 	return modelEventStream(ctx,
-		ModelEvent{Kind: ModelTextDelta, Delta: "The approved tool completed"},
-		ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "The approved tool completed; this turn is complete."}},
+		ModelEvent{Kind: ModelTextDelta, ItemID: "msg_1", Delta: "The approved tool "},
+		ModelEvent{Kind: ModelTextDelta, ItemID: "msg_1", Delta: "completed; this turn is complete."},
+		ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{ID: "msg_1", Kind: "text"}},
 	)
 }

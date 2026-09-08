@@ -12,6 +12,7 @@ type TurnContext struct {
 	toolResults              []ToolResult
 	pendingApprovals         []ApprovalRequest
 	history                  []HistoryItem
+	streamedAssistantText    map[string]string
 	streamedToolInputs       map[string]string
 	lastResponseHadToolCalls bool
 	needsFollowUp            bool
@@ -28,7 +29,7 @@ type Session struct {
 	initialInput     string
 	toolTimeout      time.Duration
 	streamRetry      RetryPolicy
-	onTextDelta      func(string)
+	onTextDelta      func(itemID, delta string)
 	onToolInputDelta func(callID, delta string)
 }
 
@@ -46,8 +47,9 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 
 func (s *Session) runTurn(ctx context.Context) *TurnContext {
 	turn := &TurnContext{
-		history:            []HistoryItem{{Role: "user", Content: s.initialInput}},
-		streamedToolInputs: make(map[string]string),
+		history:               []HistoryItem{{Role: "user", Content: s.initialInput}},
+		streamedAssistantText: make(map[string]string),
+		streamedToolInputs:    make(map[string]string),
 	}
 	return s.continueTurn(ctx, turn)
 }
@@ -105,8 +107,9 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 		for event := range stream.Events {
 			switch event.Kind {
 			case ModelTextDelta:
+				turn.streamedAssistantText[event.ItemID] += event.Delta
 				if s.onTextDelta != nil {
-					s.onTextDelta(event.Delta)
+					s.onTextDelta(event.ItemID, event.Delta)
 				}
 			case ModelToolInputDelta:
 				turn.streamedToolInputs[event.CallID] += event.Delta
@@ -115,7 +118,8 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 				}
 			case ModelOutputItemDone:
 				completedItems++
-				item := turn.finalizeStreamedToolInput(event.Item)
+				item := turn.finalizeStreamedAssistantText(event.Item)
+				item = turn.finalizeStreamedToolInput(item)
 				output := s.handleOutputItemDone(ctx, turn, item)
 				needsFollowUp = needsFollowUp || output.NeedsFollowUp
 				if output.ToolFuture != nil {
@@ -143,6 +147,19 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 			}
 		}
 	}
+}
+
+func (t *TurnContext) finalizeStreamedAssistantText(item ResponseItem) ResponseItem {
+	if item.Kind != "text" {
+		return item
+	}
+	if text, ok := t.streamedAssistantText[item.ID]; ok {
+		if item.Text == "" {
+			item.Text = text
+		}
+		delete(t.streamedAssistantText, item.ID)
+	}
+	return item
 }
 
 func (t *TurnContext) finalizeStreamedToolInput(item ResponseItem) ResponseItem {

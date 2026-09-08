@@ -104,7 +104,7 @@ func (m *historyRecordingModel) Stream(ctx context.Context, input []HistoryItem)
 	m.responseNumber++
 	if m.responseNumber == 1 {
 		return modelEventStream(ctx,
-			ModelEvent{Kind: ModelTextDelta, Delta: "draft text"},
+			ModelEvent{Kind: ModelTextDelta, ItemID: "draft_1", Delta: "draft text"},
 			ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "echo", Input: "a very long tool result for context", CallID: "call_1"}},
 		)
 	}
@@ -127,6 +127,16 @@ func (m *toolInputDeltaModel) Stream(ctx context.Context, _ []HistoryItem) Model
 		ModelEvent{Kind: ModelToolInputDelta, CallID: "call_delta", Delta: "echo "},
 		ModelEvent{Kind: ModelToolInputDelta, CallID: "call_delta", Delta: "assembled"},
 		ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "exec", CallID: "call_delta"}},
+	)
+}
+
+type streamedTextModel struct{}
+
+func (streamedTextModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	return modelEventStream(ctx,
+		ModelEvent{Kind: ModelTextDelta, ItemID: "message_1", Delta: "Hello, "},
+		ModelEvent{Kind: ModelTextDelta, ItemID: "message_1", Delta: "streaming world."},
+		ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{ID: "message_1", Kind: "text"}},
 	)
 }
 
@@ -235,7 +245,7 @@ func TestModelReceivesAppendOnlyHistoryWithBoundedToolOutput(t *testing.T) {
 	session := &Session{
 		model:        model,
 		initialInput: "test task",
-		onTextDelta:  func(delta string) { deltas = append(deltas, delta) },
+		onTextDelta:  func(_ string, delta string) { deltas = append(deltas, delta) },
 		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
 	}
 	session.runTurn(context.Background())
@@ -383,5 +393,25 @@ func TestToolInputDeltasAreAssembledOnlyWhenItemCompletes(t *testing.T) {
 	}
 	if _, ok := turn.streamedToolInputs["call_delta"]; ok {
 		t.Error("completed tool call still has a streamed input buffer")
+	}
+}
+
+func TestAssistantTextDeltasAreCommittedOnlyWhenItemCompletes(t *testing.T) {
+	var observed []string
+	session := &Session{
+		model: streamedTextModel{},
+		onTextDelta: func(itemID, delta string) {
+			observed = append(observed, itemID+":"+delta)
+		},
+	}
+	turn := session.runTurn(context.Background())
+	if got, want := strings.Join(observed, ","), "message_1:Hello, ,message_1:streaming world."; got != want {
+		t.Errorf("observed deltas = %q, want %q", got, want)
+	}
+	if got, want := turn.history[1].Content, "Hello, streaming world."; got != want {
+		t.Errorf("assistant history = %q, want %q", got, want)
+	}
+	if _, ok := turn.streamedAssistantText["message_1"]; ok {
+		t.Error("completed text item still has a streamed text buffer")
 	}
 }

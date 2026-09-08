@@ -13,6 +13,7 @@ const (
 type ModelEvent struct {
 	Kind   ModelEventKind
 	Delta  string
+	ItemID string
 	CallID string
 	Item   ResponseItem
 }
