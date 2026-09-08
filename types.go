@@ -28,6 +28,18 @@ type ToolCall struct {
 	Name, Input, ID string
 }
 
+type ItemErrorKind string
+
+const (
+	ItemRespondToModel ItemErrorKind = "respond_to_model"
+	ItemFatal          ItemErrorKind = "fatal"
+)
+
+type ItemError struct {
+	Kind    ItemErrorKind
+	Message string
+}
+
 type ApprovalRequest struct {
 	CallID, Tool, Input, Reason string
 }
@@ -49,6 +61,7 @@ type ToolFuture struct {
 type OutputItemResult struct {
 	ToolFuture    *ToolFuture
 	NeedsFollowUp bool
+	FatalError    *ItemError
 }
 
 // ToolDispatchOutcome makes "do not run the handler" explicit.

@@ -415,3 +415,25 @@ func TestAssistantTextDeltasAreCommittedOnlyWhenItemCompletes(t *testing.T) {
 		t.Error("completed text item still has a streamed text buffer")
 	}
 }
+
+func TestMalformedToolCallBecomesModelVisibleErrorAndFollowUp(t *testing.T) {
+	session := &Session{
+		model: &oneResponseModel{items: []ResponseItem{{Kind: "tool_call", CallID: "call_bad"}}},
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{}},
+	}
+	turn := session.runTurn(context.Background())
+	if turn.fatalError != nil || len(turn.toolResults) != 0 {
+		t.Fatalf("malformed call took the wrong path: fatal=%#v results=%#v", turn.fatalError, turn.toolResults)
+	}
+	if got, want := turn.history[1], (HistoryItem{Role: "tool_error", CallID: "call_bad", Content: "tool call is missing a tool name"}); got != want {
+		t.Errorf("model-visible tool error = %#v, want %#v", got, want)
+	}
+}
+
+func TestUnsupportedCompletedItemIsFatal(t *testing.T) {
+	session := &Session{model: &oneResponseModel{items: []ResponseItem{{Kind: "unsupported"}}}}
+	turn := session.runTurn(context.Background())
+	if turn.fatalError == nil || turn.fatalError.Kind != ItemFatal {
+		t.Fatalf("unsupported item was not fatal: %#v", turn.fatalError)
+	}
+}

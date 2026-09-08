@@ -18,6 +18,7 @@ type TurnContext struct {
 	needsFollowUp            bool
 	followUpReason           string
 	streamFailure            *StreamFailure
+	fatalError               *ItemError
 }
 
 type StopHook func(*TurnContext)
@@ -34,14 +35,21 @@ type Session struct {
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
-	if item.Kind == "text" {
+	call, itemError := buildToolCall(item)
+	if itemError != nil {
+		if itemError.Kind == ItemRespondToModel {
+			turn.history = append(turn.history, HistoryItem{Role: "tool_error", CallID: item.CallID, Content: itemError.Message})
+			return OutputItemResult{NeedsFollowUp: true}
+		}
+		return OutputItemResult{FatalError: itemError}
+	}
+	if call == nil {
 		turn.history = append(turn.history, HistoryItem{Role: "assistant", Content: item.Text})
 		fmt.Println("assistant:", item.Text)
 		return OutputItemResult{}
 	}
-	call := ToolCall{Name: item.Tool, Input: item.Input, ID: item.CallID}
 	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
-	future := s.startTool(ctx, call, false)
+	future := s.startTool(ctx, *call, false)
 	return OutputItemResult{ToolFuture: &future, NeedsFollowUp: true}
 }
 
@@ -56,7 +64,7 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
-		toolFutures, needsFollowUp, streamFailure := s.streamResponse(ctx, turn)
+		toolFutures, needsFollowUp, streamFailure, fatalError := s.streamResponse(ctx, turn)
 		turn.lastResponseHadToolCalls = len(toolFutures) > 0
 		turn.needsFollowUp = turn.needsFollowUp || needsFollowUp
 		for _, future := range toolFutures {
@@ -78,6 +86,10 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			turn.streamFailure = streamFailure
 			return turn
 		}
+		if fatalError != nil {
+			turn.fatalError = fatalError
+			return turn
+		}
 		for _, hook := range s.stopHooks {
 			hook(turn)
 		}
@@ -94,7 +106,7 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 	}
 }
 
-func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*ToolFuture, bool, *StreamFailure) {
+func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*ToolFuture, bool, *StreamFailure, *ItemError) {
 	maxAttempts := s.streamRetry.MaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -104,7 +116,11 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 		var toolFutures []*ToolFuture
 		needsFollowUp := false
 		completedItems := 0
+		var fatalError *ItemError
 		for event := range stream.Events {
+			if fatalError != nil {
+				continue
+			}
 			switch event.Kind {
 			case ModelTextDelta:
 				turn.streamedAssistantText[event.ItemID] += event.Delta
@@ -122,27 +138,31 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 				item = turn.finalizeStreamedToolInput(item)
 				output := s.handleOutputItemDone(ctx, turn, item)
 				needsFollowUp = needsFollowUp || output.NeedsFollowUp
+				fatalError = output.FatalError
 				if output.ToolFuture != nil {
 					toolFutures = append(toolFutures, output.ToolFuture)
 				}
 			}
 		}
 		failure := <-stream.Err
+		if fatalError != nil {
+			return toolFutures, needsFollowUp, nil, fatalError
+		}
 		if failure == nil {
-			return toolFutures, needsFollowUp, nil
+			return toolFutures, needsFollowUp, nil, nil
 		}
 		// Replaying a stream after a completed item could duplicate an already
 		// executed side effect. Production Codex has richer history recovery;
 		// this teaching version retries only before a semantic item is complete.
 		if !failure.Retryable || completedItems > 0 || attempt == maxAttempts {
-			return toolFutures, needsFollowUp, failure
+			return toolFutures, needsFollowUp, failure, nil
 		}
 		if s.streamRetry.Backoff > 0 {
 			timer := time.NewTimer(s.streamRetry.Backoff)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return toolFutures, needsFollowUp, &StreamFailure{Message: ctx.Err().Error()}
+				return toolFutures, needsFollowUp, &StreamFailure{Message: ctx.Err().Error()}, nil
 			case <-timer.C:
 			}
 		}

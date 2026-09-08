@@ -64,3 +64,4 @@
 - [x] Buffer streamed tool-input deltas by call ID until the output item completes.
 - [x] Derive follow-up from completed tool items instead of demo-specific stop-hook logic.
 - [x] Buffer assistant text deltas by item ID and commit them only at item completion.
+- [x] Separate router validation errors from executor/registry errors.
