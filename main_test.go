@@ -30,6 +30,10 @@ type countingExecutor struct{ calls int }
 
 type contextWaitingExecutor struct{}
 
+type cancellationRecordingExecutor struct {
+	started chan struct{}
+}
+
 type flakyExecutor struct {
 	failuresBeforeSuccess int
 	calls                 int
@@ -79,6 +83,12 @@ func (contextWaitingExecutor) Handle(ctx context.Context, _ string) ToolResult {
 	return ToolResult{IsError: true, Output: ctx.Err().Error()}
 }
 
+func (e cancellationRecordingExecutor) Handle(ctx context.Context, _ string) ToolResult {
+	close(e.started)
+	<-ctx.Done()
+	return ToolResult{IsError: true, Output: ctx.Err().Error()}
+}
+
 func (e *countingExecutor) Handle(_ context.Context, input string) ToolResult {
 	e.calls++
 	return ToolResult{Output: input}
@@ -93,9 +103,11 @@ func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 type oneResponseModel struct {
 	items []ResponseItem
 	sent  bool
+	calls int
 }
 
 func (m *oneResponseModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	m.calls++
 	if m.sent {
 		return modelEventStream(ctx)
 	}
@@ -323,6 +335,35 @@ func TestSessionToolTimeoutCancelsContextAwareExecutor(t *testing.T) {
 	result := turn.toolResults[0]
 	if !result.IsError || result.CallID != "call_timeout" || result.Output != context.DeadlineExceeded.Error() {
 		t.Fatalf("unexpected timeout result: %#v", result)
+	}
+}
+
+func TestCancelledTurnDrainsStartedToolsButDoesNotRequestFollowUp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor := cancellationRecordingExecutor{started: make(chan struct{})}
+	model := &oneResponseModel{items: []ResponseItem{{Kind: "tool_call", Tool: "wait", CallID: "call_cancel"}}}
+	session := &Session{
+		model: model,
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{"wait": executor}},
+	}
+	done := make(chan *TurnContext, 1)
+	go func() { done <- session.runTurn(ctx) }()
+	<-executor.started
+	cancel()
+	turn := <-done
+
+	if turn.cancellationErr != context.Canceled {
+		t.Fatalf("cancellation error = %v, want context canceled", turn.cancellationErr)
+	}
+	if got, want := len(turn.toolResults), 1; got != want {
+		t.Fatalf("tool result count = %d, want %d", got, want)
+	}
+	if got, want := turn.toolResults[0].Output, context.Canceled.Error(); got != want {
+		t.Errorf("cancelled tool output = %q, want %q", got, want)
+	}
+	if got, want := model.calls, 1; got != want {
+		t.Errorf("model stream calls = %d, want %d", got, want)
 	}
 }
 

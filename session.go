@@ -19,6 +19,7 @@ type TurnContext struct {
 	followUpReason           string
 	streamFailure            *StreamFailure
 	fatalError               *ItemError
+	cancellationErr          error
 }
 
 type StopHook func(*TurnContext)
@@ -81,6 +82,13 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			turn.toolResults = append(turn.toolResults, *outcome.Result)
 			turn.recordToolResult(*outcome.Result)
 			fmt.Printf("tool result (%s): %s\n", outcome.Result.CallID, outcome.Result.Output)
+		}
+		// The parent context owns this complete turn, including every future it
+		// started. We first drain those futures so their cancellation outcomes are
+		// recorded, then stop before asking the model for another response.
+		if err := ctx.Err(); err != nil {
+			turn.cancellationErr = err
+			return turn
 		}
 		if streamFailure != nil {
 			turn.streamFailure = streamFailure

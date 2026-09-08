@@ -20,6 +20,7 @@ The program intentionally supports only `echo ...`, making each run deterministi
 4. Context/history construction and bounded tool outputs. *(implemented)*
 5. Cancellation, retries and observability. *(implemented)*
 6. Streaming model output. *(implemented, including safe pre-item transport retries)*
+7. Turn cancellation ownership. *(implemented: drain started tools, then stop before follow-up)*
 
 See [the tracking checklist](docs/TRACKING.md) for the current state.
 

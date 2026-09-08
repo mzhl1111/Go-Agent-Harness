@@ -66,3 +66,9 @@
 - [x] Buffer assistant text deltas by item ID and commit them only at item completion.
 - [x] Separate router validation errors from executor/registry errors.
 - [x] Make tool parallelism an explicit executor capability with a safe serial default.
+
+## Current milestone: 7 — turn cancellation ownership
+
+- [x] Drain every started tool future after parent-context cancellation.
+- [x] Stop the turn before a cancellation can trigger a model follow-up.
+- [x] Preserve the cancelled tool result in history for inspection.
