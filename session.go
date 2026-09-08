@@ -67,21 +67,7 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 		toolFutures, needsFollowUp, streamFailure, fatalError := s.streamResponse(ctx, turn)
 		turn.lastResponseHadToolCalls = len(toolFutures) > 0
 		turn.needsFollowUp = turn.needsFollowUp || needsFollowUp
-		for _, future := range toolFutures {
-			outcome := <-future.result
-			if future.cancel != nil {
-				future.cancel()
-			}
-			if outcome.Approval != nil {
-				turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
-				turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
-				s.emit(TurnEvent{Kind: TurnApprovalNeeded, CallID: outcome.Approval.CallID, Tool: outcome.Approval.Tool, Message: outcome.Approval.Reason})
-				continue
-			}
-			turn.toolResults = append(turn.toolResults, *outcome.Result)
-			turn.recordToolResult(*outcome.Result)
-			s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Content: outcome.Result.Output})
-		}
+		s.drainToolFutures(turn, toolFutures)
 		// The parent context owns this complete turn, including every future it
 		// started. We first drain those futures so their cancellation outcomes are
 		// recorded, then stop before asking the model for another response.
@@ -114,6 +100,27 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 		}
 		s.emit(TurnEvent{Kind: TurnCompleted})
 		return turn
+	}
+}
+
+// drainToolFutures collects tool outcomes in completed-output-item order, not
+// handler completion order. That keeps model history deterministic even when
+// handlers execute concurrently.
+func (s *Session) drainToolFutures(turn *TurnContext, toolFutures []*ToolFuture) {
+	for _, future := range toolFutures {
+		outcome := <-future.result
+		if future.cancel != nil {
+			future.cancel()
+		}
+		if outcome.Approval != nil {
+			turn.pendingApprovals = append(turn.pendingApprovals, *outcome.Approval)
+			turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: outcome.Approval.CallID, Content: outcome.Approval.Reason})
+			s.emit(TurnEvent{Kind: TurnApprovalNeeded, CallID: outcome.Approval.CallID, Tool: outcome.Approval.Tool, Message: outcome.Approval.Reason})
+			continue
+		}
+		turn.toolResults = append(turn.toolResults, *outcome.Result)
+		turn.recordToolResult(*outcome.Result)
+		s.emit(TurnEvent{Kind: TurnToolResult, CallID: outcome.Result.CallID, Content: outcome.Result.Output})
 	}
 }
 

@@ -78,3 +78,8 @@
 - [x] Replace session-local printing and delta callbacks with a unified `TurnObserver`.
 - [x] Keep runtime events separate from durable model history.
 - [x] Demonstrate a replaceable CLI observer and test event delivery.
+
+## Current milestone: 9 — deterministic future draining
+
+- [x] Make the ordered future-drain boundary explicit in `Session`.
+- [x] Verify tool handlers may finish out of order while history and turn events remain in model-item order.

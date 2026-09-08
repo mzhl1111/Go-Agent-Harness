@@ -13,7 +13,14 @@ type blockingExecutor struct {
 	release <-chan struct{}
 }
 
-func (blockingExecutor) SupportsParallelToolCalls() bool { return true }
+type outOfOrderExecutor struct {
+	firstStarted   chan struct{}
+	secondFinished chan struct{}
+	releaseFirst   <-chan struct{}
+}
+
+func (blockingExecutor) SupportsParallelToolCalls() bool   { return true }
+func (outOfOrderExecutor) SupportsParallelToolCalls() bool { return true }
 
 type serialBlockingExecutor struct {
 	started chan string
@@ -115,6 +122,17 @@ func (e *countingExecutor) Handle(_ context.Context, input string) ToolResult {
 func (e blockingExecutor) Handle(_ context.Context, input string) ToolResult {
 	e.started <- input
 	<-e.release
+	return ToolResult{Output: input}
+}
+
+func (e outOfOrderExecutor) Handle(_ context.Context, input string) ToolResult {
+	if input == "first" {
+		close(e.firstStarted)
+		<-e.releaseFirst
+		return ToolResult{Output: input}
+	}
+	<-e.firstStarted
+	close(e.secondFinished)
 	return ToolResult{Output: input}
 }
 
@@ -222,6 +240,42 @@ func TestToolCallsStartConcurrentlyAndKeepModelOrder(t *testing.T) {
 	}
 	if got, want := turn.toolResults[1].CallID, "call_2"; got != want {
 		t.Errorf("second result CallID = %q, want %q", got, want)
+	}
+}
+
+func TestToolResultsAreDrainedInModelOrderEvenWhenCompletionIsOutOfOrder(t *testing.T) {
+	releaseFirst := make(chan struct{})
+	executor := outOfOrderExecutor{
+		firstStarted:   make(chan struct{}),
+		secondFinished: make(chan struct{}),
+		releaseFirst:   releaseFirst,
+	}
+	observer := &recordingTurnObserver{}
+	session := &Session{
+		model: &oneResponseModel{items: []ResponseItem{
+			{Kind: "tool_call", Tool: "ordered", Input: "first", CallID: "call_1"},
+			{Kind: "tool_call", Tool: "ordered", Input: "second", CallID: "call_2"},
+		}},
+		tools:    &ToolRegistry{executors: map[string]ToolExecutor{"ordered": executor}},
+		observer: observer,
+	}
+	done := make(chan *TurnContext, 1)
+	go func() { done <- session.runTurn(context.Background()) }()
+	<-executor.secondFinished // The second handler has returned while the first remains blocked.
+	close(releaseFirst)
+	turn := <-done
+
+	if got, want := []string{turn.toolResults[0].CallID, turn.toolResults[1].CallID}, []string{"call_1", "call_2"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("tool result order = %v, want %v", got, want)
+	}
+	var eventCallIDs []string
+	for _, event := range observer.events {
+		if event.Kind == TurnToolResult {
+			eventCallIDs = append(eventCallIDs, event.CallID)
+		}
+	}
+	if got, want := strings.Join(eventCallIDs, ","), "call_1,call_2"; got != want {
+		t.Errorf("tool-result event order = %q, want %q", got, want)
 	}
 }
 
