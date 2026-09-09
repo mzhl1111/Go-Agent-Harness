@@ -295,6 +295,37 @@ func TestDirectModelToolCallKeepsDirectSourceThroughResultAndEvent(t *testing.T)
 	t.Fatal("missing tool-result event")
 }
 
+func TestCellIssuesNestedToolCallThroughExistingRegistry(t *testing.T) {
+	observer := &recordingObserver{}
+	tools := &ToolRegistry{
+		executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}},
+		observer:  observer,
+	}
+	cells := NewCellManager()
+	cell := cells.Start("outer_code_call")
+	future, err := cells.StartTool(context.Background(), tools, cell.ID, "echo", "echo from cell")
+	if err != nil {
+		t.Fatalf("start nested tool: %v", err)
+	}
+	result := (<-future.result).Result
+	if result.Source.Kind != ToolCallCodeMode || result.Source.CellID != cell.ID || result.Source.RuntimeToolCallID != "tool_1" {
+		t.Fatalf("nested result source = %#v", result.Source)
+	}
+	if got, want := result.Output, "from cell"; got != want {
+		t.Errorf("nested tool output = %q, want %q", got, want)
+	}
+	events := observer.snapshot()
+	if got, want := events[0].Source.Kind, ToolCallCodeMode; got != want {
+		t.Errorf("dispatch source = %q, want %q", got, want)
+	}
+	if err := cells.Complete(cell.ID); err != nil {
+		t.Fatalf("complete cell: %v", err)
+	}
+	if _, err := cells.StartTool(context.Background(), tools, cell.ID, "echo", "echo after complete"); err == nil {
+		t.Error("completed cell started another nested tool")
+	}
+}
+
 func TestReusedToolCallIDWithDifferentContentsIsFatal(t *testing.T) {
 	session := &Session{
 		model: &oneResponseModel{items: []ResponseItem{

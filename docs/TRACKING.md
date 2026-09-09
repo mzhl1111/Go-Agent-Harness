@@ -93,7 +93,7 @@
 ## Planned milestone: 11 — code mode (after direct-runtime foundations)
 
 - [x] Add explicit direct-call provenance to the direct harness as the base for nested cell calls.
-- [ ] Introduce a persistent `Cell` execution abstraction distinct from an agent turn.
-- [ ] Let a cell issue nested tool calls through the existing registry, preserving a `Direct` versus `CodeMode` call source.
+- [x] Introduce a persistent `Cell` execution abstraction distinct from an agent turn.
+- [x] Let a cell issue nested tool calls through the existing registry, preserving a `Direct` versus `CodeMode` call source.
 - [ ] Model `yield`, `wait`, completion, and cancellation at the cell boundary.
 - [ ] Compare the teaching design with Codex's code-mode host and its `OpenSession → SubscribeToToolCalls → CompleteToolCall` protocol.
