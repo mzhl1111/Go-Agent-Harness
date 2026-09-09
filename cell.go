@@ -12,6 +12,7 @@ type Cell struct {
 	ID                string
 	OriginatingCallID string
 	State             CellState
+	LastYield         string
 	nextToolSequence  int
 }
 
@@ -19,12 +20,13 @@ type CellState string
 
 const (
 	CellRunning   CellState = "running"
+	CellYielded   CellState = "yielded"
 	CellCompleted CellState = "completed"
 	CellCancelled CellState = "cancelled"
 )
 
-// CellManager owns cell identity and issues nested calls. A later lesson will
-// add yielded cells and a real runtime; this version is deliberately in-process.
+// CellManager owns cell identity, lifecycle, and nested calls. This version is
+// deliberately in-process; a later lesson will add a real runtime.
 type CellManager struct {
 	mu     sync.Mutex
 	nextID int
@@ -90,14 +92,16 @@ func (m *CellManager) StartTool(ctx context.Context, tools *ToolRegistry, cellID
 }
 
 func (m *CellManager) Complete(cellID string) error {
-	return m.transition(cellID, CellCompleted)
+	return m.transition(cellID, CellCompleted, CellRunning)
 }
 
 func (m *CellManager) Cancel(cellID string) error {
-	return m.transition(cellID, CellCancelled)
+	return m.transition(cellID, CellCancelled, CellRunning, CellYielded)
 }
 
-func (m *CellManager) transition(cellID string, next CellState) error {
+// Yield preserves the cell and its local tool sequence while handing control
+// back to the caller. A yielded cell cannot issue another nested call.
+func (m *CellManager) Yield(cellID, output string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cell, ok := m.cells[cellID]
@@ -105,8 +109,31 @@ func (m *CellManager) transition(cellID string, next CellState) error {
 		return fmt.Errorf("unknown cell: %s", cellID)
 	}
 	if cell.State != CellRunning {
-		return fmt.Errorf("cell %s is already %s", cellID, cell.State)
+		return fmt.Errorf("cell %s is %s", cellID, cell.State)
 	}
-	cell.State = next
+	cell.State = CellYielded
+	cell.LastYield = output
 	return nil
+}
+
+// Wait represents the harness asking a previously yielded cell to continue.
+// The cell is running again only after this explicit transition.
+func (m *CellManager) Wait(cellID string) error {
+	return m.transition(cellID, CellRunning, CellYielded)
+}
+
+func (m *CellManager) transition(cellID string, next CellState, allowed ...CellState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cell, ok := m.cells[cellID]
+	if !ok {
+		return fmt.Errorf("unknown cell: %s", cellID)
+	}
+	for _, state := range allowed {
+		if cell.State == state {
+			cell.State = next
+			return nil
+		}
+	}
+	return fmt.Errorf("cell %s is %s", cellID, cell.State)
 }

@@ -326,6 +326,34 @@ func TestCellIssuesNestedToolCallThroughExistingRegistry(t *testing.T) {
 	}
 }
 
+func TestYieldedCellWaitsBeforeItCanResumeNestedTools(t *testing.T) {
+	cells := NewCellManager()
+	cell := cells.Start("outer_code_call")
+	if err := cells.Yield(cell.ID, "waiting for model"); err != nil {
+		t.Fatalf("yield cell: %v", err)
+	}
+	yielded, ok := cells.Snapshot(cell.ID)
+	if !ok || yielded.State != CellYielded || yielded.LastYield != "waiting for model" {
+		t.Fatalf("yielded cell = %#v, found=%t", yielded, ok)
+	}
+	if _, err := cells.StartTool(context.Background(), &ToolRegistry{}, cell.ID, "echo", "echo blocked"); err == nil {
+		t.Error("yielded cell started a nested tool")
+	}
+	if err := cells.Wait(cell.ID); err != nil {
+		t.Fatalf("wait cell: %v", err)
+	}
+	resumed, _ := cells.Snapshot(cell.ID)
+	if got, want := resumed.State, CellRunning; got != want {
+		t.Errorf("resumed state = %q, want %q", got, want)
+	}
+	if err := cells.Cancel(cell.ID); err != nil {
+		t.Fatalf("cancel resumed cell: %v", err)
+	}
+	if err := cells.Wait(cell.ID); err == nil {
+		t.Error("cancelled cell resumed")
+	}
+}
+
 func TestReusedToolCallIDWithDifferentContentsIsFatal(t *testing.T) {
 	session := &Session{
 		model: &oneResponseModel{items: []ResponseItem{
