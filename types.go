@@ -4,12 +4,13 @@ import "context"
 
 // ResponseItem is the small subset of a model response that our harness needs.
 type ResponseItem struct {
-	ID     string
-	Kind   string // "text" or "tool_call"
-	Text   string
-	Tool   string
-	Input  string
-	CallID string
+	ID          string
+	Kind        string // "text", "tool_call", or "code_cell"
+	Text        string
+	Tool        string
+	Input       string
+	CallID      string
+	CellProgram string
 }
 
 type ToolResult struct {
@@ -93,9 +94,24 @@ type ToolFuture struct {
 	cancel func()
 }
 
+// CellFuture represents a started code-mode cell whose next runtime response
+// will later be bridged back into the agent turn.
+type CellFuture struct {
+	result <-chan CellOutput
+	cancel func()
+}
+
+// PendingFuture preserves completed-model-item order across direct tools and
+// code cells while allowing both kinds of work to execute concurrently.
+type PendingFuture struct {
+	Tool *ToolFuture
+	Cell *CellFuture
+}
+
 // OutputItemResult reports the runtime consequences of one completed model item.
 type OutputItemResult struct {
 	ToolFuture    *ToolFuture
+	CellFuture    *CellFuture
 	NeedsFollowUp bool
 	FatalError    *ItemError
 }

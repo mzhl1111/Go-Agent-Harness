@@ -201,6 +201,22 @@ func (streamedTextModel) Stream(ctx context.Context, _ []HistoryItem) ModelStrea
 	)
 }
 
+type codeCellRecordingModel struct {
+	inputs    [][]HistoryItem
+	responses int
+}
+
+func (m *codeCellRecordingModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responses++
+	if m.responses == 1 {
+		return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{
+			Kind: "code_cell", CallID: "call_code", CellProgram: "echo_then_yield",
+		}})
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "cell result received"}})
+}
+
 func (m *flakyStreamModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
 	m.attempts++
 	if m.attempts == 1 {
@@ -384,6 +400,44 @@ func TestOnlyCellLevelOutputReturnsToAgentHistory(t *testing.T) {
 	}
 	if got, want := observer.events[0].Kind, TurnCellOutput; got != want {
 		t.Errorf("event kind = %q, want %q", got, want)
+	}
+}
+
+func TestCompletedCodeCellRunsInsideTurnAndReturnsOneCellOutput(t *testing.T) {
+	model := &codeCellRecordingModel{}
+	executor := &countingExecutor{}
+	session := &Session{
+		model: model,
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{"echo": executor}},
+		cellPrograms: map[string]CellProgram{
+			"echo_then_yield": CellProgramFunc(func(ctx context.Context, cell *CellContext) (CellResponse, error) {
+				outcome, err := cell.CallTool(ctx, "echo", "nested value")
+				if err != nil {
+					return CellResponse{}, err
+				}
+				return CellResponse{State: CellYielded, Content: "nested result: " + outcome.Result.Output}, nil
+			}),
+		},
+	}
+	turn := session.runTurn(context.Background())
+
+	if got, want := executor.calls, 1; got != want {
+		t.Fatalf("nested executor calls = %d, want %d", got, want)
+	}
+	if got, want := model.responses, 2; got != want {
+		t.Fatalf("model responses = %d, want %d", got, want)
+	}
+	secondInput := model.inputs[1]
+	if got, want := secondInput[len(secondInput)-1], (HistoryItem{Role: "tool", CallID: "call_code", Content: "Script running with cell ID cell_1\nOutput:\nnested result: nested value"}); got != want {
+		t.Errorf("cell output in second model input = %#v, want %#v", got, want)
+	}
+	for _, item := range secondInput {
+		if item.CallID == "cell_1_tool_1" {
+			t.Error("nested cell tool result leaked into agent history")
+		}
+	}
+	if got, want := turn.history[len(turn.history)-1].Content, "cell result received"; got != want {
+		t.Errorf("final assistant output = %q, want %q", got, want)
 	}
 }
 

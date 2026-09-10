@@ -138,6 +138,72 @@ type CellOutput struct {
 	Content                   string
 }
 
+// CellProgram is the teaching stand-in for a JavaScript runtime. Its local
+// control flow may invoke nested tools, then yield or complete one cell output.
+type CellProgram interface {
+	Run(context.Context, *CellContext) (CellResponse, error)
+}
+
+type CellProgramFunc func(context.Context, *CellContext) (CellResponse, error)
+
+func (f CellProgramFunc) Run(ctx context.Context, cell *CellContext) (CellResponse, error) {
+	return f(ctx, cell)
+}
+
+type CellResponse struct {
+	State   CellState // CellYielded or CellCompleted
+	Content string
+}
+
+// CellContext is a program's local capability to invoke nested tools. It does
+// not expose agent history, because nested results belong to the cell.
+type CellContext struct {
+	manager *CellManager
+	tools   *ToolRegistry
+	cellID  string
+}
+
+func (c *CellContext) CallTool(ctx context.Context, toolName, input string) (ToolDispatchOutcome, error) {
+	future, err := c.manager.StartTool(ctx, c.tools, c.cellID, toolName, input)
+	if err != nil {
+		return ToolDispatchOutcome{}, err
+	}
+	return <-future.result, nil
+}
+
+func (m *CellManager) StartProgram(ctx context.Context, tools *ToolRegistry, originatingCallID string, program CellProgram) CellFuture {
+	cell := m.Start(originatingCallID)
+	result := make(chan CellOutput, 1)
+	programCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer cancel()
+		response, err := program.Run(programCtx, &CellContext{manager: m, tools: tools, cellID: cell.ID})
+		if err != nil {
+			_ = m.Complete(cell.ID, "Script error: "+err.Error())
+		} else if programCtx.Err() != nil {
+			_ = m.Cancel(cell.ID)
+		} else {
+			switch response.State {
+			case CellYielded:
+				err = m.Yield(cell.ID, response.Content)
+			case CellCompleted:
+				err = m.Complete(cell.ID, response.Content)
+			default:
+				err = fmt.Errorf("cell program returned invalid state: %s", response.State)
+			}
+			if err != nil {
+				_ = m.Complete(cell.ID, "Script error: "+err.Error())
+			}
+		}
+		output, outputErr := m.OutputForModel(cell.ID)
+		if outputErr != nil {
+			output = CellOutput{CellID: cell.ID, OriginatingCallID: originatingCallID, State: CellCancelled, Content: outputErr.Error()}
+		}
+		result <- output
+	}()
+	return CellFuture{result: result, cancel: cancel}
+}
+
 func (m *CellManager) finish(cellID string, next CellState, output string, allowed ...CellState) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -33,9 +33,14 @@ type Session struct {
 	toolTimeout  time.Duration
 	streamRetry  RetryPolicy
 	observer     TurnObserver
+	cells        *CellManager
+	cellPrograms map[string]CellProgram
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
+	if item.Kind == "code_cell" {
+		return s.handleCodeCell(ctx, turn, item)
+	}
 	call, itemError := buildToolCall(item)
 	if itemError != nil {
 		if itemError.Kind == ItemRespondToModel {
@@ -63,6 +68,40 @@ func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, i
 	return OutputItemResult{ToolFuture: &future, NeedsFollowUp: true}
 }
 
+func (s *Session) handleCodeCell(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
+	if item.CallID == "" || item.CellProgram == "" {
+		message := "code cell is missing a call ID or program name"
+		turn.history = append(turn.history, HistoryItem{Role: "tool_error", CallID: item.CallID, Content: message})
+		return OutputItemResult{NeedsFollowUp: true}
+	}
+	call := ToolCall{Name: "code_cell", Input: item.CellProgram, ID: item.CallID, Source: ToolCallSource{Kind: ToolCallDirect}}
+	if previous, alreadyAdmitted := turn.admittedToolCalls[call.ID]; alreadyAdmitted {
+		if previous.Name == call.Name && previous.Input == call.Input && previous.Source.sameAs(call.Source) {
+			s.emit(TurnEvent{Kind: TurnDuplicateTool, CallID: call.ID, Tool: call.Name, Source: call.Source})
+			return OutputItemResult{}
+		}
+		return OutputItemResult{FatalError: &ItemError{Kind: ItemFatal, Message: "tool call ID was reused with different contents: " + call.ID}}
+	}
+	program, ok := s.cellPrograms[item.CellProgram]
+	if !ok {
+		message := "unknown cell program: " + item.CellProgram
+		turn.history = append(turn.history, HistoryItem{Role: "tool_error", CallID: item.CallID, Content: message})
+		return OutputItemResult{NeedsFollowUp: true}
+	}
+	turn.admittedToolCalls[call.ID] = call
+	turn.history = append(turn.history, HistoryItem{Role: "assistant_tool_call", CallID: call.ID, Content: call.Name + " " + call.Input})
+	s.emit(TurnEvent{Kind: TurnItemCompleted, CallID: call.ID, Tool: call.Name, Source: call.Source, Content: call.Input})
+	future := s.cellManager().StartProgram(ctx, s.tools, call.ID, program)
+	return OutputItemResult{CellFuture: &future, NeedsFollowUp: true}
+}
+
+func (s *Session) cellManager() *CellManager {
+	if s.cells == nil {
+		s.cells = NewCellManager()
+	}
+	return s.cells
+}
+
 func (s *Session) runTurn(ctx context.Context) *TurnContext {
 	turn := &TurnContext{
 		history:               []HistoryItem{{Role: "user", Content: s.initialInput}},
@@ -75,10 +114,10 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
-		toolFutures, needsFollowUp, streamFailure, fatalError := s.streamResponse(ctx, turn)
-		turn.lastResponseHadToolCalls = len(toolFutures) > 0
+		pendingFutures, needsFollowUp, streamFailure, fatalError := s.streamResponse(ctx, turn)
+		turn.lastResponseHadToolCalls = len(pendingFutures) > 0
 		turn.needsFollowUp = turn.needsFollowUp || needsFollowUp
-		s.drainToolFutures(turn, toolFutures)
+		s.drainPendingFutures(turn, pendingFutures)
 		// The parent context owns this complete turn, including every future it
 		// started. We first drain those futures so their cancellation outcomes are
 		// recorded, then stop before asking the model for another response.
@@ -114,11 +153,19 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 	}
 }
 
-// drainToolFutures collects tool outcomes in completed-output-item order, not
-// handler completion order. That keeps model history deterministic even when
-// handlers execute concurrently.
-func (s *Session) drainToolFutures(turn *TurnContext, toolFutures []*ToolFuture) {
-	for _, future := range toolFutures {
+// drainPendingFutures collects direct-tool and cell outcomes in
+// completed-output-item order, not execution completion order.
+func (s *Session) drainPendingFutures(turn *TurnContext, pendingFutures []PendingFuture) {
+	for _, pending := range pendingFutures {
+		if pending.Cell != nil {
+			output := <-pending.Cell.result
+			if pending.Cell.cancel != nil {
+				pending.Cell.cancel()
+			}
+			s.recordCellOutput(turn, output)
+			continue
+		}
+		future := pending.Tool
 		outcome := <-future.result
 		if future.cancel != nil {
 			future.cancel()
@@ -135,14 +182,14 @@ func (s *Session) drainToolFutures(turn *TurnContext, toolFutures []*ToolFuture)
 	}
 }
 
-func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*ToolFuture, bool, *StreamFailure, *ItemError) {
+func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]PendingFuture, bool, *StreamFailure, *ItemError) {
 	maxAttempts := s.streamRetry.MaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
 	for attempt := 1; ; attempt++ {
 		stream := s.model.Stream(ctx, turn.modelInput())
-		var toolFutures []*ToolFuture
+		var pendingFutures []PendingFuture
 		needsFollowUp := false
 		completedItems := 0
 		var fatalError *ItemError
@@ -165,29 +212,32 @@ func (s *Session) streamResponse(ctx context.Context, turn *TurnContext) ([]*Too
 				needsFollowUp = needsFollowUp || output.NeedsFollowUp
 				fatalError = output.FatalError
 				if output.ToolFuture != nil {
-					toolFutures = append(toolFutures, output.ToolFuture)
+					pendingFutures = append(pendingFutures, PendingFuture{Tool: output.ToolFuture})
+				}
+				if output.CellFuture != nil {
+					pendingFutures = append(pendingFutures, PendingFuture{Cell: output.CellFuture})
 				}
 			}
 		}
 		failure := <-stream.Err
 		if fatalError != nil {
-			return toolFutures, needsFollowUp, nil, fatalError
+			return pendingFutures, needsFollowUp, nil, fatalError
 		}
 		if failure == nil {
-			return toolFutures, needsFollowUp, nil, nil
+			return pendingFutures, needsFollowUp, nil, nil
 		}
 		// Replaying a stream after a completed item could duplicate an already
 		// executed side effect. Production Codex has richer history recovery;
 		// this teaching version retries only before a semantic item is complete.
 		if !failure.Retryable || completedItems > 0 || attempt == maxAttempts {
-			return toolFutures, needsFollowUp, failure, nil
+			return pendingFutures, needsFollowUp, failure, nil
 		}
 		if s.streamRetry.Backoff > 0 {
 			timer := time.NewTimer(s.streamRetry.Backoff)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return toolFutures, needsFollowUp, &StreamFailure{Message: ctx.Err().Error()}, nil
+				return pendingFutures, needsFollowUp, &StreamFailure{Message: ctx.Err().Error()}, nil
 			case <-timer.C:
 			}
 		}

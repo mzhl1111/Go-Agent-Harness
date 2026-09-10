@@ -22,6 +22,7 @@ runtime sequence. Codex keeps an outer call ID and a per-cell runtime tool-call
 ID as separate protocol values. The important invariant is the same: each cell
 has a stable identity and each nested call has a monotonic identity inside it.
 
-This version supports `running → completed` and `running → cancelled` state
-transitions. The next layer will add a cell program and its `yield / wait`
-behavior; only then will we connect a cell's final output back to an agent turn.
+The later lessons add the `yield / wait` state machine, a `CellProgram`, and a
+completed-model-item path that returns only the final cell output to the agent
+turn. This small file remains the cell identity and nested-call foundation for
+those layers.

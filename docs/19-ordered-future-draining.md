@@ -5,8 +5,10 @@ futures as their output items complete. Their handlers may finish in either
 order. That is an execution detail, not a reason to make the next model input
 nondeterministic.
 
-`Session.drainToolFutures()` waits for the futures in original completed-item
-order and only then commits each result to history and emits `TurnToolResult`.
+`Session.drainPendingFutures()` waits for pending work in original
+completed-item order and only then commits each result. A pending item may be a
+direct tool future or a code-cell future; direct results emit `TurnToolResult`,
+while a cell publishes one `TurnCellOutput`.
 
 ```text
 model items:       call_1 ───────── call_2

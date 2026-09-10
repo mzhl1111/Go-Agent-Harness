@@ -19,5 +19,6 @@ Terminal cells cannot resume.
 Codex's `code_mode.wait` tool asks its code-mode service either to wait for a
 live cell or terminate it. The service returns another runtime response, which
 may itself be yielded, completed, or terminated. Our state machine is the
-smallest version of that contract: it establishes lifecycle correctness before
-we add timers, JavaScript execution, transport, or model-visible cell output.
+smallest version of that contract; later lessons attach its cell-level output
+to the turn loop, while timers, JavaScript execution, and transport remain out
+of scope.
