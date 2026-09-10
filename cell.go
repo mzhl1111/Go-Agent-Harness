@@ -12,7 +12,7 @@ type Cell struct {
 	ID                string
 	OriginatingCallID string
 	State             CellState
-	LastYield         string
+	Output            string
 	nextToolSequence  int
 }
 
@@ -91,8 +91,8 @@ func (m *CellManager) StartTool(ctx context.Context, tools *ToolRegistry, cellID
 	return tools.Start(ctx, call), nil
 }
 
-func (m *CellManager) Complete(cellID string) error {
-	return m.transition(cellID, CellCompleted, CellRunning)
+func (m *CellManager) Complete(cellID, output string) error {
+	return m.finish(cellID, CellCompleted, output, CellRunning)
 }
 
 func (m *CellManager) Cancel(cellID string) error {
@@ -102,24 +102,57 @@ func (m *CellManager) Cancel(cellID string) error {
 // Yield preserves the cell and its local tool sequence while handing control
 // back to the caller. A yielded cell cannot issue another nested call.
 func (m *CellManager) Yield(cellID, output string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cell, ok := m.cells[cellID]
-	if !ok {
-		return fmt.Errorf("unknown cell: %s", cellID)
-	}
-	if cell.State != CellRunning {
-		return fmt.Errorf("cell %s is %s", cellID, cell.State)
-	}
-	cell.State = CellYielded
-	cell.LastYield = output
-	return nil
+	return m.finish(cellID, CellYielded, output, CellRunning)
 }
 
 // Wait represents the harness asking a previously yielded cell to continue.
 // The cell is running again only after this explicit transition.
 func (m *CellManager) Wait(cellID string) error {
 	return m.transition(cellID, CellRunning, CellYielded)
+}
+
+// OutputForModel returns only a cell-level runtime response. Nested tool
+// results are intentionally not exposed here: they belong to the cell's local
+// program state until it yields or finishes.
+func (m *CellManager) OutputForModel(cellID string) (CellOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cell, ok := m.cells[cellID]
+	if !ok {
+		return CellOutput{}, fmt.Errorf("unknown cell: %s", cellID)
+	}
+	if cell.State == CellRunning {
+		return CellOutput{}, fmt.Errorf("cell %s is still running", cellID)
+	}
+	return CellOutput{
+		CellID:            cell.ID,
+		OriginatingCallID: cell.OriginatingCallID,
+		State:             cell.State,
+		Content:           cell.Output,
+	}, nil
+}
+
+type CellOutput struct {
+	CellID, OriginatingCallID string
+	State                     CellState
+	Content                   string
+}
+
+func (m *CellManager) finish(cellID string, next CellState, output string, allowed ...CellState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cell, ok := m.cells[cellID]
+	if !ok {
+		return fmt.Errorf("unknown cell: %s", cellID)
+	}
+	for _, state := range allowed {
+		if cell.State == state {
+			cell.State = next
+			cell.Output = output
+			return nil
+		}
+	}
+	return fmt.Errorf("cell %s is %s", cellID, cell.State)
 }
 
 func (m *CellManager) transition(cellID string, next CellState, allowed ...CellState) error {

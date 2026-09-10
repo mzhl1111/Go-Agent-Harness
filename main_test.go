@@ -318,7 +318,7 @@ func TestCellIssuesNestedToolCallThroughExistingRegistry(t *testing.T) {
 	if got, want := events[0].Source.Kind, ToolCallCodeMode; got != want {
 		t.Errorf("dispatch source = %q, want %q", got, want)
 	}
-	if err := cells.Complete(cell.ID); err != nil {
+	if err := cells.Complete(cell.ID, "finished"); err != nil {
 		t.Fatalf("complete cell: %v", err)
 	}
 	if _, err := cells.StartTool(context.Background(), tools, cell.ID, "echo", "echo after complete"); err == nil {
@@ -333,7 +333,7 @@ func TestYieldedCellWaitsBeforeItCanResumeNestedTools(t *testing.T) {
 		t.Fatalf("yield cell: %v", err)
 	}
 	yielded, ok := cells.Snapshot(cell.ID)
-	if !ok || yielded.State != CellYielded || yielded.LastYield != "waiting for model" {
+	if !ok || yielded.State != CellYielded || yielded.Output != "waiting for model" {
 		t.Fatalf("yielded cell = %#v, found=%t", yielded, ok)
 	}
 	if _, err := cells.StartTool(context.Background(), &ToolRegistry{}, cell.ID, "echo", "echo blocked"); err == nil {
@@ -351,6 +351,39 @@ func TestYieldedCellWaitsBeforeItCanResumeNestedTools(t *testing.T) {
 	}
 	if err := cells.Wait(cell.ID); err == nil {
 		t.Error("cancelled cell resumed")
+	}
+}
+
+func TestOnlyCellLevelOutputReturnsToAgentHistory(t *testing.T) {
+	observer := &recordingTurnObserver{}
+	session := &Session{observer: observer}
+	turn := &TurnContext{history: []HistoryItem{{Role: "user", Content: "run code"}}}
+	cells := NewCellManager()
+	cell := cells.Start("call_code_1")
+	if err := cells.Yield(cell.ID, "two files found"); err != nil {
+		t.Fatalf("yield cell: %v", err)
+	}
+	output, err := cells.OutputForModel(cell.ID)
+	if err != nil {
+		t.Fatalf("cell output: %v", err)
+	}
+	session.recordCellOutput(turn, output)
+
+	if got, want := len(turn.history), 2; got != want {
+		t.Fatalf("history items = %d, want %d", got, want)
+	}
+	result := turn.history[1]
+	if result.Role != "tool" || result.CallID != "call_code_1" {
+		t.Fatalf("cell history item = %#v", result)
+	}
+	if got, want := result.Content, "Script running with cell ID cell_1\nOutput:\ntwo files found"; got != want {
+		t.Errorf("cell history content = %q, want %q", got, want)
+	}
+	if !turn.needsFollowUp {
+		t.Error("cell output did not request a model follow-up")
+	}
+	if got, want := observer.events[0].Kind, TurnCellOutput; got != want {
+		t.Errorf("event kind = %q, want %q", got, want)
 	}
 }
 

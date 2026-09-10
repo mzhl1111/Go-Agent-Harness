@@ -6,6 +6,7 @@ import (
 )
 
 const maxToolOutputChars = 24
+const maxCellOutputChars = 128
 
 type TurnContext struct {
 	toolResults              []ToolResult
@@ -248,6 +249,27 @@ func (s *Session) emit(event TurnEvent) {
 	if s.observer != nil {
 		s.observer.OnTurn(event)
 	}
+}
+
+// recordCellOutput is the bridge from the cell runtime back to the agent turn.
+// It publishes one cell-level result under the originating top-level call ID;
+// individual nested tool results remain local to the cell.
+func (s *Session) recordCellOutput(turn *TurnContext, output CellOutput) {
+	status := "Script completed"
+	switch output.State {
+	case CellYielded:
+		status = "Script running with cell ID " + output.CellID
+	case CellCancelled:
+		status = "Script terminated"
+	}
+	content := status + "\nOutput:\n" + output.Content
+	turn.history = append(turn.history, HistoryItem{
+		Role:    "tool",
+		CallID:  output.OriginatingCallID,
+		Content: truncateToolOutput(content, maxCellOutputChars),
+	})
+	turn.needsFollowUp = true
+	s.emit(TurnEvent{Kind: TurnCellOutput, CallID: output.OriginatingCallID, CellID: output.CellID, Content: content})
 }
 
 func (s *Session) startTool(ctx context.Context, call ToolCall, approvalGranted bool) ToolFuture {

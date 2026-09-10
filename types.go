@@ -139,6 +139,7 @@ type TurnEvent struct {
 	Kind    TurnEventKind
 	ItemID  string
 	CallID  string
+	CellID  string
 	Tool    string
 	Source  ToolCallSource
 	Content string
@@ -158,6 +159,7 @@ const (
 	TurnStreamFailed   TurnEventKind = "stream_failed"
 	TurnFatal          TurnEventKind = "fatal"
 	TurnDuplicateTool  TurnEventKind = "duplicate_tool_ignored"
+	TurnCellOutput     TurnEventKind = "cell_output"
 	TurnCompleted      TurnEventKind = "completed"
 )
 
