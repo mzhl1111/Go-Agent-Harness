@@ -11,6 +11,7 @@ const maxCellOutputChars = 128
 type TurnContext struct {
 	toolResults              []ToolResult
 	pendingApprovals         []ApprovalRequest
+	pendingCellApprovals     map[string]PendingCellApproval
 	history                  []HistoryItem
 	streamedAssistantText    map[string]string
 	streamedToolInputs       map[string]string
@@ -108,6 +109,7 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 		streamedAssistantText: make(map[string]string),
 		streamedToolInputs:    make(map[string]string),
 		admittedToolCalls:     make(map[string]ToolCall),
+		pendingCellApprovals:  make(map[string]PendingCellApproval),
 	}
 	return s.continueTurn(ctx, turn)
 }
@@ -158,11 +160,23 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 func (s *Session) drainPendingFutures(turn *TurnContext, pendingFutures []PendingFuture) {
 	for _, pending := range pendingFutures {
 		if pending.Cell != nil {
-			output := <-pending.Cell.result
+			outcome := <-pending.Cell.result
 			if pending.Cell.cancel != nil {
 				pending.Cell.cancel()
 			}
-			s.recordCellOutput(turn, output)
+			if outcome.Approval != nil {
+				request := outcome.Approval.Request
+				turn.pendingApprovals = append(turn.pendingApprovals, request)
+				turn.pendingCellApprovals[request.CallID] = *outcome.Approval
+				turn.history = append(turn.history, HistoryItem{Role: "approval", CallID: request.CallID, Content: request.Reason})
+				s.emit(TurnEvent{Kind: TurnApprovalNeeded, CallID: request.CallID, Tool: request.Tool, Source: request.Source, Message: request.Reason})
+				continue
+			}
+			if outcome.Output == nil {
+				turn.fatalError = &ItemError{Kind: ItemFatal, Message: "cell future returned no outcome"}
+				continue
+			}
+			s.recordCellOutput(turn, *outcome.Output)
 			continue
 		}
 		future := pending.Tool
@@ -274,6 +288,9 @@ func (t *TurnContext) finalizeStreamedToolInput(item ResponseItem) ResponseItem 
 // model for its next response with the same turn context. It never replays the
 // model response that originally created the approval request.
 func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID string) *TurnContext {
+	if pending, ok := turn.pendingCellApprovals[callID]; ok {
+		return s.resumeCellApproved(ctx, turn, pending)
+	}
 	for index, request := range turn.pendingApprovals {
 		if request.CallID != callID {
 			continue
@@ -293,6 +310,38 @@ func (s *Session) resumeApproved(ctx context.Context, turn *TurnContext, callID 
 		return s.continueTurn(ctx, turn)
 	}
 	return turn
+}
+
+func (s *Session) resumeCellApproved(ctx context.Context, turn *TurnContext, pending PendingCellApproval) *TurnContext {
+	request := pending.Request
+	call := ToolCall{Name: request.Tool, Input: request.Input, ID: request.CallID, Source: request.Source}
+	future := s.startTool(ctx, call, true)
+	outcome := <-future.result
+	if future.cancel != nil {
+		future.cancel()
+	}
+	if outcome.Result == nil {
+		turn.fatalError = &ItemError{Kind: ItemFatal, Message: "approved nested tool did not return a result"}
+		return turn
+	}
+	output, err := s.cellManager().ResumeApproved(ctx, pending, *outcome.Result)
+	if err != nil {
+		turn.fatalError = &ItemError{Kind: ItemFatal, Message: err.Error()}
+		return turn
+	}
+	delete(turn.pendingCellApprovals, request.CallID)
+	for index, approval := range turn.pendingApprovals {
+		if approval.CallID == request.CallID {
+			turn.pendingApprovals = append(turn.pendingApprovals[:index], turn.pendingApprovals[index+1:]...)
+			break
+		}
+	}
+	s.recordCellOutput(turn, output)
+	// recordCellOutput requests the next model response. This resume path is
+	// about to enter that response directly, so consume the flag here instead
+	// of carrying it into the next loop iteration.
+	turn.needsFollowUp = false
+	return s.continueTurn(ctx, turn)
 }
 
 func (s *Session) emit(event TurnEvent) {

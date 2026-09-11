@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -204,6 +206,22 @@ func (streamedTextModel) Stream(ctx context.Context, _ []HistoryItem) ModelStrea
 type codeCellRecordingModel struct {
 	inputs    [][]HistoryItem
 	responses int
+}
+
+type codeCellApprovalModel struct {
+	inputs    [][]HistoryItem
+	responses int
+}
+
+func (m *codeCellApprovalModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responses++
+	if m.responses == 1 {
+		return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{
+			Kind: "code_cell", CallID: "call_code_approval", CellProgram: "approval_then_yield",
+		}})
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "approved cell result received"}})
 }
 
 func (m *codeCellRecordingModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
@@ -439,6 +457,69 @@ func TestCompletedCodeCellRunsInsideTurnAndReturnsOneCellOutput(t *testing.T) {
 	if got, want := turn.history[len(turn.history)-1].Content, "cell result received"; got != want {
 		t.Errorf("final assistant output = %q, want %q", got, want)
 	}
+}
+
+func TestApprovedNestedToolResumesItsCellWithoutReplayingProgram(t *testing.T) {
+	model := &codeCellApprovalModel{}
+	executor := &countingExecutor{}
+	programRuns := 0
+	session := &Session{
+		model: model,
+		tools: &ToolRegistry{
+			executors: map[string]ToolExecutor{"guarded": executor},
+			pre: []PreHook{func(ToolCall) PreHookOutcome {
+				return PreHookOutcome{Decision: PreHookNeedsApproval, Reason: "nested approval"}
+			}},
+		},
+		cellPrograms: map[string]CellProgram{
+			"approval_then_yield": CellProgramFunc(func(ctx context.Context, cell *CellContext) (CellResponse, error) {
+				programRuns++
+				outcome, err := cell.CallTool(ctx, "guarded", "nested input")
+				if err != nil {
+					return CellResponse{}, err
+				}
+				if outcome.Approval == nil {
+					return CellResponse{}, fmt.Errorf("expected nested approval")
+				}
+				return CellResponse{Approval: &CellApproval{
+					Request: *outcome.Approval,
+					Resume: func(_ context.Context, result ToolResult) (CellResponse, error) {
+						return CellResponse{State: CellYielded, Content: "approved nested: " + result.Output}, nil
+					},
+				}}, nil
+			}),
+		},
+	}
+	turn := session.runTurn(context.Background())
+	if got, want := []int{programRuns, executor.calls, len(turn.pendingApprovals)}, []int{1, 0, 1}; strings.Join(intsToStrings(got), ",") != strings.Join(intsToStrings(want), ",") {
+		t.Fatalf("before approval = %v, want %v", got, want)
+	}
+	approvalID := turn.pendingApprovals[0].CallID
+	if _, ok := turn.pendingCellApprovals[approvalID]; !ok {
+		t.Fatal("nested approval did not retain a cell continuation")
+	}
+
+	turn = session.resumeApproved(context.Background(), turn, approvalID)
+	if got, want := []int{programRuns, executor.calls, model.responses}, []int{1, 1, 2}; strings.Join(intsToStrings(got), ",") != strings.Join(intsToStrings(want), ",") {
+		t.Fatalf("after approval = %v, want %v", got, want)
+	}
+	secondInput := model.inputs[1]
+	if got, want := secondInput[len(secondInput)-1].Content, "Script running with cell ID cell_1\nOutput:\napproved nested: nested input"; got != want {
+		t.Errorf("approved cell output = %q, want %q", got, want)
+	}
+	for _, item := range secondInput {
+		if item.Role == "tool" && item.CallID == approvalID {
+			t.Error("approved nested result leaked into agent history")
+		}
+	}
+}
+
+func intsToStrings(values []int) []string {
+	stringsValues := make([]string, len(values))
+	for index, value := range values {
+		stringsValues[index] = strconv.Itoa(value)
+	}
+	return stringsValues
 }
 
 func TestReusedToolCallIDWithDifferentContentsIsFatal(t *testing.T) {

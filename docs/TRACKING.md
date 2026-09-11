@@ -98,4 +98,5 @@
 - [x] Model `yield`, `wait`, completion, and cancellation at the cell boundary.
 - [x] Return only cell-level yield/completion output to the agent history under its originating call ID.
 - [x] Route a completed model `code_cell` item through a `CellProgram` and back into the outer turn loop.
+- [x] Suspend a cell for nested approval and resume its exact continuation without replaying the program.
 - [ ] Compare the teaching design with Codex's code-mode host and its `OpenSession → SubscribeToToolCalls → CompleteToolCall` protocol.

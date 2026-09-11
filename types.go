@@ -97,7 +97,7 @@ type ToolFuture struct {
 // CellFuture represents a started code-mode cell whose next runtime response
 // will later be bridged back into the agent turn.
 type CellFuture struct {
-	result <-chan CellOutput
+	result <-chan CellRunOutcome
 	cancel func()
 }
 
@@ -114,6 +114,14 @@ type OutputItemResult struct {
 	CellFuture    *CellFuture
 	NeedsFollowUp bool
 	FatalError    *ItemError
+}
+
+// PendingCellApproval retains the cell-local continuation that must receive an
+// approved nested tool result. It never belongs in direct tool-result history.
+type PendingCellApproval struct {
+	Request ApprovalRequest
+	CellID  string
+	resume  CellResume
 }
 
 // ToolDispatchOutcome makes "do not run the handler" explicit.

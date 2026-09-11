@@ -19,10 +19,11 @@ type Cell struct {
 type CellState string
 
 const (
-	CellRunning   CellState = "running"
-	CellYielded   CellState = "yielded"
-	CellCompleted CellState = "completed"
-	CellCancelled CellState = "cancelled"
+	CellRunning         CellState = "running"
+	CellYielded         CellState = "yielded"
+	CellWaitingApproval CellState = "waiting_approval"
+	CellCompleted       CellState = "completed"
+	CellCancelled       CellState = "cancelled"
 )
 
 // CellManager owns cell identity, lifecycle, and nested calls. This version is
@@ -96,7 +97,7 @@ func (m *CellManager) Complete(cellID, output string) error {
 }
 
 func (m *CellManager) Cancel(cellID string) error {
-	return m.transition(cellID, CellCancelled, CellRunning, CellYielded)
+	return m.transition(cellID, CellCancelled, CellRunning, CellYielded, CellWaitingApproval)
 }
 
 // Yield preserves the cell and its local tool sequence while handing control
@@ -151,8 +152,22 @@ func (f CellProgramFunc) Run(ctx context.Context, cell *CellContext) (CellRespon
 }
 
 type CellResponse struct {
-	State   CellState // CellYielded or CellCompleted
-	Content string
+	State    CellState // CellYielded or CellCompleted
+	Content  string
+	Approval *CellApproval
+}
+
+type CellResume func(context.Context, ToolResult) (CellResponse, error)
+
+// CellApproval makes the program's suspend-and-resume boundary explicit.
+type CellApproval struct {
+	Request ApprovalRequest
+	Resume  CellResume
+}
+
+type CellRunOutcome struct {
+	Output   *CellOutput
+	Approval *PendingCellApproval
 }
 
 // CellContext is a program's local capability to invoke nested tools. It does
@@ -173,13 +188,26 @@ func (c *CellContext) CallTool(ctx context.Context, toolName, input string) (Too
 
 func (m *CellManager) StartProgram(ctx context.Context, tools *ToolRegistry, originatingCallID string, program CellProgram) CellFuture {
 	cell := m.Start(originatingCallID)
-	result := make(chan CellOutput, 1)
+	result := make(chan CellRunOutcome, 1)
 	programCtx, cancel := context.WithCancel(ctx)
 	go func() {
 		defer cancel()
 		response, err := program.Run(programCtx, &CellContext{manager: m, tools: tools, cellID: cell.ID})
 		if err != nil {
 			_ = m.Complete(cell.ID, "Script error: "+err.Error())
+		} else if response.Approval != nil {
+			if response.Approval.Resume == nil {
+				_ = m.Complete(cell.ID, "Script error: approval response is missing a continuation")
+			} else if transitionErr := m.transition(cell.ID, CellWaitingApproval, CellRunning); transitionErr != nil {
+				_ = m.Complete(cell.ID, "Script error: "+transitionErr.Error())
+			} else {
+				result <- CellRunOutcome{Approval: &PendingCellApproval{
+					Request: response.Approval.Request,
+					CellID:  cell.ID,
+					resume:  response.Approval.Resume,
+				}}
+				return
+			}
 		} else if programCtx.Err() != nil {
 			_ = m.Cancel(cell.ID)
 		} else {
@@ -199,9 +227,34 @@ func (m *CellManager) StartProgram(ctx context.Context, tools *ToolRegistry, ori
 		if outputErr != nil {
 			output = CellOutput{CellID: cell.ID, OriginatingCallID: originatingCallID, State: CellCancelled, Content: outputErr.Error()}
 		}
-		result <- output
+		result <- CellRunOutcome{Output: &output}
 	}()
 	return CellFuture{result: result, cancel: cancel}
+}
+
+// ResumeApproved delivers one approved nested result back to the exact cell
+// continuation. It never restarts the cell program from its beginning.
+func (m *CellManager) ResumeApproved(ctx context.Context, pending PendingCellApproval, result ToolResult) (CellOutput, error) {
+	if err := m.transition(pending.CellID, CellRunning, CellWaitingApproval); err != nil {
+		return CellOutput{}, err
+	}
+	response, err := pending.resume(ctx, result)
+	if err != nil {
+		_ = m.Complete(pending.CellID, "Script error: "+err.Error())
+	} else {
+		switch response.State {
+		case CellYielded:
+			err = m.Yield(pending.CellID, response.Content)
+		case CellCompleted:
+			err = m.Complete(pending.CellID, response.Content)
+		default:
+			err = fmt.Errorf("approval continuation returned invalid state: %s", response.State)
+		}
+		if err != nil {
+			_ = m.Complete(pending.CellID, "Script error: "+err.Error())
+		}
+	}
+	return m.OutputForModel(pending.CellID)
 }
 
 func (m *CellManager) finish(cellID string, next CellState, output string, allowed ...CellState) error {
