@@ -623,7 +623,7 @@ func TestCancellingTurnRemovesOnlyCellOwnedApprovals(t *testing.T) {
 
 func TestHostNestedToolAdapterKeepsHostAndRuntimeIdentitiesSeparate(t *testing.T) {
 	sink := recordingHostCompletionSink{completions: make(chan HostToolCompletion, 1)}
-	adapter := HostNestedToolAdapter{
+	adapter := &HostNestedToolAdapter{
 		tools: &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
 		sink:  sink,
 	}
@@ -653,6 +653,54 @@ func TestHostNestedToolAdapterKeepsHostAndRuntimeIdentitiesSeparate(t *testing.T
 	}
 	if got, want := completion.Result.Source.RuntimeToolCallID, "runtime_3"; got != want {
 		t.Errorf("runtime tool call ID = %q, want %q", got, want)
+	}
+}
+
+func TestApprovedHostNestedToolCompletesTheOriginalInvocation(t *testing.T) {
+	executor := &countingExecutor{}
+	sink := recordingHostCompletionSink{completions: make(chan HostToolCompletion, 1)}
+	adapter := &HostNestedToolAdapter{
+		tools: &ToolRegistry{
+			executors: map[string]ToolExecutor{"count": executor},
+			pre: []PreHook{func(ToolCall) PreHookOutcome {
+				return PreHookOutcome{Decision: PreHookNeedsApproval, Reason: "host approval required"}
+			}},
+		},
+		sink: sink,
+	}
+	initial := adapter.Dispatch(context.Background(), HostToolCall{
+		InvocationID: "host_invocation_9", CellID: "cell_9", RuntimeToolCallID: "runtime_1", Tool: "count", Input: "sensitive",
+	})
+	paused := <-initial.result
+	if paused.Err != nil || paused.Approval == nil {
+		t.Fatalf("initial host outcome = %#v", paused)
+	}
+	if got, want := paused.Approval.Source.HostInvocationID, "host_invocation_9"; got != want {
+		t.Errorf("approval host invocation ID = %q, want %q", got, want)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor calls before approval = %d, want 0", executor.calls)
+	}
+	select {
+	case completion := <-sink.completions:
+		t.Fatalf("host completed before approval: %#v", completion)
+	default:
+	}
+
+	resumed := <-adapter.ResumeApproved(context.Background(), "host_invocation_9").result
+	if resumed.Err != nil || resumed.Completion == nil {
+		t.Fatalf("resumed host outcome = %#v", resumed)
+	}
+	completion := <-sink.completions
+	if got, want := completion.InvocationID, "host_invocation_9"; got != want {
+		t.Errorf("completed host invocation ID = %q, want %q", got, want)
+	}
+	if executor.calls != 1 {
+		t.Errorf("executor calls after approval = %d, want 1", executor.calls)
+	}
+	missing := <-adapter.ResumeApproved(context.Background(), "host_invocation_9").result
+	if missing.Err == nil {
+		t.Error("second resume unexpectedly succeeded")
 	}
 }
 

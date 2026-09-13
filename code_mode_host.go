@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // HostToolCall is the host-facing form of one nested code-mode invocation.
@@ -44,46 +45,105 @@ type HostToolCallFuture struct {
 // HostNestedToolAdapter bridges a host-pushed nested call into the existing
 // policy/registry path. It neither executes cell code nor owns an agent turn.
 type HostNestedToolAdapter struct {
-	tools *ToolRegistry
-	sink  HostToolCompletionSink
+	tools   *ToolRegistry
+	sink    HostToolCompletionSink
+	mu      sync.Mutex
+	pending map[string]ToolCall
 }
 
-func (a HostNestedToolAdapter) Dispatch(ctx context.Context, hostCall HostToolCall) HostToolCallFuture {
+func (a *HostNestedToolAdapter) Dispatch(ctx context.Context, hostCall HostToolCall) HostToolCallFuture {
 	result := make(chan HostToolCallOutcome, 1)
 	if err := hostCall.validate(); err != nil {
 		result <- HostToolCallOutcome{Err: err}
 		return HostToolCallFuture{result: result}
 	}
-	call := ToolCall{
-		Name:  hostCall.Tool,
-		Input: hostCall.Input,
-		ID:    fmt.Sprintf("%s_%s", hostCall.CellID, hostCall.RuntimeToolCallID),
-		Source: ToolCallSource{
-			Kind:              ToolCallCodeMode,
-			CellID:            hostCall.CellID,
-			RuntimeToolCallID: hostCall.RuntimeToolCallID,
-			HostInvocationID:  hostCall.InvocationID,
-		},
+	if a.tools == nil {
+		result <- HostToolCallOutcome{Err: fmt.Errorf("code-mode tool registry is not configured")}
+		return HostToolCallFuture{result: result}
 	}
+	call := hostCall.toolCall()
 	future := a.tools.Start(ctx, call)
 	go func() {
 		outcome := <-future.result
 		if outcome.Approval != nil {
+			if err := a.savePending(hostCall.InvocationID, call); err != nil {
+				result <- HostToolCallOutcome{Err: err}
+				return
+			}
 			result <- HostToolCallOutcome{Approval: outcome.Approval}
 			return
 		}
-		completion := HostToolCompletion{InvocationID: hostCall.InvocationID, Result: *outcome.Result}
-		if a.sink == nil {
-			result <- HostToolCallOutcome{Err: fmt.Errorf("code-mode host completion sink is not configured")}
-			return
-		}
-		if err := a.sink.CompleteToolCall(ctx, completion); err != nil {
-			result <- HostToolCallOutcome{Err: err}
-			return
-		}
-		result <- HostToolCallOutcome{Completion: &completion}
+		result <- a.complete(ctx, hostCall.InvocationID, outcome)
 	}()
 	return HostToolCallFuture{result: result}
+}
+
+// ResumeApproved starts exactly the host call that was paused for approval.
+// It uses StartAfterApproval, so policy hooks are not asked to approve it a
+// second time, and it completes the original host invocation ID.
+func (a *HostNestedToolAdapter) ResumeApproved(ctx context.Context, invocationID string) HostToolCallFuture {
+	result := make(chan HostToolCallOutcome, 1)
+	call, ok := a.takePending(invocationID)
+	if !ok {
+		result <- HostToolCallOutcome{Err: fmt.Errorf("no pending host tool call for invocation ID: %s", invocationID)}
+		return HostToolCallFuture{result: result}
+	}
+	future := a.tools.StartAfterApproval(ctx, call)
+	go func() {
+		result <- a.complete(ctx, invocationID, <-future.result)
+	}()
+	return HostToolCallFuture{result: result}
+}
+
+func (a *HostNestedToolAdapter) complete(ctx context.Context, invocationID string, outcome ToolDispatchOutcome) HostToolCallOutcome {
+	if outcome.Result == nil {
+		return HostToolCallOutcome{Err: fmt.Errorf("host tool call returned no result")}
+	}
+	completion := HostToolCompletion{InvocationID: invocationID, Result: *outcome.Result}
+	if a.sink == nil {
+		return HostToolCallOutcome{Err: fmt.Errorf("code-mode host completion sink is not configured")}
+	}
+	if err := a.sink.CompleteToolCall(ctx, completion); err != nil {
+		return HostToolCallOutcome{Err: err}
+	}
+	return HostToolCallOutcome{Completion: &completion}
+}
+
+func (a *HostNestedToolAdapter) savePending(invocationID string, call ToolCall) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending == nil {
+		a.pending = make(map[string]ToolCall)
+	}
+	if _, exists := a.pending[invocationID]; exists {
+		return fmt.Errorf("host tool call is already pending: %s", invocationID)
+	}
+	a.pending[invocationID] = call
+	return nil
+}
+
+func (a *HostNestedToolAdapter) takePending(invocationID string) (ToolCall, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	call, ok := a.pending[invocationID]
+	if ok {
+		delete(a.pending, invocationID)
+	}
+	return call, ok
+}
+
+func (call HostToolCall) toolCall() ToolCall {
+	return ToolCall{
+		Name:  call.Tool,
+		Input: call.Input,
+		ID:    fmt.Sprintf("%s_%s", call.CellID, call.RuntimeToolCallID),
+		Source: ToolCallSource{
+			Kind:              ToolCallCodeMode,
+			CellID:            call.CellID,
+			RuntimeToolCallID: call.RuntimeToolCallID,
+			HostInvocationID:  call.InvocationID,
+		},
+	}
 }
 
 func (call HostToolCall) validate() error {
