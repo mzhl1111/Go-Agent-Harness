@@ -22,6 +22,7 @@ The program intentionally supports only `echo ...`, making each run deterministi
 6. Streaming model output. *(implemented, including safe pre-item transport retries)*
 7. Turn cancellation ownership. *(implemented: drain started tools, then stop before follow-up)*
 8. Session event projection. *(implemented: replaceable CLI/UI/telemetry observer)*
+9. Code-mode cells. *(implemented in-process; next: a host-facing nested-call adapter)*
 
 See [the tracking checklist](docs/TRACKING.md) for the current state.
 
