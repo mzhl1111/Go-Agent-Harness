@@ -103,4 +103,4 @@
 - [x] Compare the teaching design with Codex's code-mode host and its `OpenSession → SubscribeToToolCalls → CompleteToolCall` protocol.
 - [x] Separate host `invocation_id` from runtime tool-call identity in a host-facing nested-call adapter.
 - [x] Preserve a host-originated nested approval and complete that exact host invocation only after approval.
-- [ ] Model host-side cancellation of a pending nested invocation without invoking its executor.
+- [x] Model host-side cancellation of a pending nested invocation without invoking its executor.

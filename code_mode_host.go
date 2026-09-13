@@ -45,10 +45,11 @@ type HostToolCallFuture struct {
 // HostNestedToolAdapter bridges a host-pushed nested call into the existing
 // policy/registry path. It neither executes cell code nor owns an agent turn.
 type HostNestedToolAdapter struct {
-	tools   *ToolRegistry
-	sink    HostToolCompletionSink
-	mu      sync.Mutex
-	pending map[string]ToolCall
+	tools     *ToolRegistry
+	sink      HostToolCompletionSink
+	mu        sync.Mutex
+	pending   map[string]ToolCall
+	cancelled map[string]struct{}
 }
 
 func (a *HostNestedToolAdapter) Dispatch(ctx context.Context, hostCall HostToolCall) HostToolCallFuture {
@@ -59,6 +60,10 @@ func (a *HostNestedToolAdapter) Dispatch(ctx context.Context, hostCall HostToolC
 	}
 	if a.tools == nil {
 		result <- HostToolCallOutcome{Err: fmt.Errorf("code-mode tool registry is not configured")}
+		return HostToolCallFuture{result: result}
+	}
+	if a.isCancelled(hostCall.InvocationID) {
+		result <- HostToolCallOutcome{Err: fmt.Errorf("host tool call is cancelled: %s", hostCall.InvocationID)}
 		return HostToolCallFuture{result: result}
 	}
 	call := hostCall.toolCall()
@@ -76,6 +81,23 @@ func (a *HostNestedToolAdapter) Dispatch(ctx context.Context, hostCall HostToolC
 		result <- a.complete(ctx, hostCall.InvocationID, outcome)
 	}()
 	return HostToolCallFuture{result: result}
+}
+
+// CancelInvocation records a host-side cancellation. A gRPC session event may
+// arrive before its ToolCall subscription item, so the cancellation remains
+// recorded and prevents a later dispatch from reaching the executor.
+//
+// This teaching adapter owns only approval-paused calls; cancelling an already
+// running executor requires propagating a per-invocation runtime context and
+// is intentionally a later concern.
+func (a *HostNestedToolAdapter) CancelInvocation(invocationID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancelled == nil {
+		a.cancelled = make(map[string]struct{})
+	}
+	a.cancelled[invocationID] = struct{}{}
+	delete(a.pending, invocationID)
 }
 
 // ResumeApproved starts exactly the host call that was paused for approval.
@@ -112,6 +134,9 @@ func (a *HostNestedToolAdapter) complete(ctx context.Context, invocationID strin
 func (a *HostNestedToolAdapter) savePending(invocationID string, call ToolCall) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if _, cancelled := a.cancelled[invocationID]; cancelled {
+		return fmt.Errorf("host tool call is cancelled: %s", invocationID)
+	}
 	if a.pending == nil {
 		a.pending = make(map[string]ToolCall)
 	}
@@ -120,6 +145,13 @@ func (a *HostNestedToolAdapter) savePending(invocationID string, call ToolCall) 
 	}
 	a.pending[invocationID] = call
 	return nil
+}
+
+func (a *HostNestedToolAdapter) isCancelled(invocationID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, cancelled := a.cancelled[invocationID]
+	return cancelled
 }
 
 func (a *HostNestedToolAdapter) takePending(invocationID string) (ToolCall, bool) {

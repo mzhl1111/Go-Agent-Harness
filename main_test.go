@@ -704,6 +704,56 @@ func TestApprovedHostNestedToolCompletesTheOriginalInvocation(t *testing.T) {
 	}
 }
 
+func TestHostCancellationRemovesPendingApprovalWithoutRunningExecutor(t *testing.T) {
+	executor := &countingExecutor{}
+	sink := recordingHostCompletionSink{completions: make(chan HostToolCompletion, 1)}
+	adapter := &HostNestedToolAdapter{
+		tools: &ToolRegistry{
+			executors: map[string]ToolExecutor{"count": executor},
+			pre: []PreHook{func(ToolCall) PreHookOutcome {
+				return PreHookOutcome{Decision: PreHookNeedsApproval, Reason: "host approval required"}
+			}},
+		},
+		sink: sink,
+	}
+	paused := <-adapter.Dispatch(context.Background(), HostToolCall{
+		InvocationID: "cancelled_after_pause", CellID: "cell_10", RuntimeToolCallID: "runtime_1", Tool: "count",
+	}).result
+	if paused.Approval == nil {
+		t.Fatalf("initial host outcome = %#v, want approval", paused)
+	}
+	adapter.CancelInvocation("cancelled_after_pause")
+	resumed := <-adapter.ResumeApproved(context.Background(), "cancelled_after_pause").result
+	if resumed.Err == nil {
+		t.Fatal("cancelled approval unexpectedly resumed")
+	}
+	if executor.calls != 0 {
+		t.Errorf("executor calls = %d, want 0", executor.calls)
+	}
+	select {
+	case completion := <-sink.completions:
+		t.Fatalf("cancelled call completed to host: %#v", completion)
+	default:
+	}
+}
+
+func TestHostCancellationBeforeToolCallbackPreventsDispatch(t *testing.T) {
+	executor := &countingExecutor{}
+	adapter := &HostNestedToolAdapter{
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{"count": executor}},
+	}
+	adapter.CancelInvocation("cancelled_before_callback")
+	outcome := <-adapter.Dispatch(context.Background(), HostToolCall{
+		InvocationID: "cancelled_before_callback", CellID: "cell_11", RuntimeToolCallID: "runtime_1", Tool: "count",
+	}).result
+	if outcome.Err == nil {
+		t.Fatal("cancelled callback unexpectedly dispatched")
+	}
+	if executor.calls != 0 {
+		t.Errorf("executor calls = %d, want 0", executor.calls)
+	}
+}
+
 func intsToStrings(values []int) []string {
 	stringsValues := make([]string, len(values))
 	for index, value := range values {
