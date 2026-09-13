@@ -101,4 +101,5 @@
 - [x] Suspend a cell for nested approval and resume its exact continuation without replaying the program.
 - [x] Terminate active cells and clear their pending approvals when the parent turn is cancelled.
 - [x] Compare the teaching design with Codex's code-mode host and its `OpenSession → SubscribeToToolCalls → CompleteToolCall` protocol.
-- [ ] Separate host `invocation_id` from runtime tool-call identity in a host-facing nested-call adapter.
+- [x] Separate host `invocation_id` from runtime tool-call identity in a host-facing nested-call adapter.
+- [ ] Preserve a host-originated nested approval and complete that exact host invocation only after approval.

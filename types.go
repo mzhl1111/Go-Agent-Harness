@@ -37,6 +37,7 @@ type ToolCallSource struct {
 	Kind              ToolCallSourceKind
 	CellID            string
 	RuntimeToolCallID string
+	HostInvocationID  string
 }
 
 type ToolCallSourceKind string

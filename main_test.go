@@ -44,6 +44,15 @@ type cancellationRecordingExecutor struct {
 	started chan struct{}
 }
 
+type recordingHostCompletionSink struct {
+	completions chan HostToolCompletion
+}
+
+func (sink recordingHostCompletionSink) CompleteToolCall(_ context.Context, completion HostToolCompletion) error {
+	sink.completions <- completion
+	return nil
+}
+
 type flakyExecutor struct {
 	failuresBeforeSuccess int
 	calls                 int
@@ -609,6 +618,41 @@ func TestCancellingTurnRemovesOnlyCellOwnedApprovals(t *testing.T) {
 	}
 	if got, want := turn.pendingApprovals, []ApprovalRequest{{CallID: "direct_call", Tool: "echo", Reason: "direct approval"}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("remaining approvals = %#v, want %#v", got, want)
+	}
+}
+
+func TestHostNestedToolAdapterKeepsHostAndRuntimeIdentitiesSeparate(t *testing.T) {
+	sink := recordingHostCompletionSink{completions: make(chan HostToolCompletion, 1)}
+	adapter := HostNestedToolAdapter{
+		tools: &ToolRegistry{executors: map[string]ToolExecutor{"echo": ExecCommandHandler{}}},
+		sink:  sink,
+	}
+	future := adapter.Dispatch(context.Background(), HostToolCall{
+		InvocationID:      "invocation_42",
+		CellID:            "cell_remote_7",
+		RuntimeToolCallID: "runtime_3",
+		Tool:              "echo",
+		Input:             "hello host",
+	})
+	outcome := <-future.result
+	if outcome.Err != nil || outcome.Approval != nil || outcome.Completion == nil {
+		t.Fatalf("adapter outcome = %#v", outcome)
+	}
+	completion := <-sink.completions
+	if completion != *outcome.Completion {
+		t.Errorf("sink completion = %#v, want %#v", completion, *outcome.Completion)
+	}
+	if got, want := completion.InvocationID, "invocation_42"; got != want {
+		t.Errorf("host invocation ID = %q, want %q", got, want)
+	}
+	if got, want := completion.Result.CallID, "cell_remote_7_runtime_3"; got != want {
+		t.Errorf("registry call ID = %q, want %q", got, want)
+	}
+	if got, want := completion.Result.Source.HostInvocationID, "invocation_42"; got != want {
+		t.Errorf("result host invocation ID = %q, want %q", got, want)
+	}
+	if got, want := completion.Result.Source.RuntimeToolCallID, "runtime_3"; got != want {
+		t.Errorf("runtime tool call ID = %q, want %q", got, want)
 	}
 }
 
