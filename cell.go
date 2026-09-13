@@ -100,6 +100,29 @@ func (m *CellManager) Cancel(cellID string) error {
 	return m.transition(cellID, CellCancelled, CellRunning, CellYielded, CellWaitingApproval)
 }
 
+// CancelAll terminates every nonterminal cell owned by this manager and
+// returns one final runtime output for each. Session uses it when its parent
+// context is cancelled, including for yielded cells with no in-flight future.
+func (m *CellManager) CancelAll(message string) []CellOutput {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var outputs []CellOutput
+	for _, cell := range m.cells {
+		switch cell.State {
+		case CellRunning, CellYielded, CellWaitingApproval:
+			cell.State = CellCancelled
+			cell.Output = message
+			outputs = append(outputs, CellOutput{
+				CellID:            cell.ID,
+				OriginatingCallID: cell.OriginatingCallID,
+				State:             cell.State,
+				Content:           cell.Output,
+			})
+		}
+	}
+	return outputs
+}
+
 // Yield preserves the cell and its local tool sequence while handing control
 // back to the caller. A yielded cell cannot issue another nested call.
 func (m *CellManager) Yield(cellID, output string) error {

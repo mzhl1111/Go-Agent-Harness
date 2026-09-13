@@ -124,6 +124,7 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 		// started. We first drain those futures so their cancellation outcomes are
 		// recorded, then stop before asking the model for another response.
 		if err := ctx.Err(); err != nil {
+			s.cancelActiveCells(turn, "turn cancelled")
 			turn.cancellationErr = err
 			s.emit(TurnEvent{Kind: TurnCancelled, Message: err.Error()})
 			return turn
@@ -153,6 +154,31 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 		s.emit(TurnEvent{Kind: TurnCompleted})
 		return turn
 	}
+}
+
+func (s *Session) cancelActiveCells(turn *TurnContext, message string) {
+	for _, output := range s.cellManager().CancelAll(message) {
+		s.recordCellOutput(turn, output)
+	}
+	// A cancelled cell cannot consume a later user approval. Remove just these
+	// cell-owned requests; direct pending approvals keep their existing state.
+	if len(turn.pendingCellApprovals) > 0 {
+		cellApprovalIDs := make(map[string]struct{}, len(turn.pendingCellApprovals))
+		for callID := range turn.pendingCellApprovals {
+			cellApprovalIDs[callID] = struct{}{}
+		}
+		var remaining []ApprovalRequest
+		for _, approval := range turn.pendingApprovals {
+			if _, isCellApproval := cellApprovalIDs[approval.CallID]; !isCellApproval {
+				remaining = append(remaining, approval)
+			}
+		}
+		turn.pendingApprovals = remaining
+		turn.pendingCellApprovals = make(map[string]PendingCellApproval)
+	}
+	// recordCellOutput normally asks for another model response. This turn is
+	// terminal, so do not let a cancellation become a follow-up request.
+	turn.needsFollowUp = false
 }
 
 // drainPendingFutures collects direct-tool and cell outcomes in

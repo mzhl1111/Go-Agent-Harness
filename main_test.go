@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,6 +212,30 @@ type codeCellRecordingModel struct {
 type codeCellApprovalModel struct {
 	inputs    [][]HistoryItem
 	responses int
+}
+
+type yieldedCellThenWaitModel struct {
+	responses     int
+	secondStarted chan struct{}
+}
+
+func (m *yieldedCellThenWaitModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
+	m.responses++
+	if m.responses == 1 {
+		return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{
+			Kind: "code_cell", CallID: "call_cancelled_cell", CellProgram: "yield_forever",
+		}})
+	}
+	events := make(chan ModelEvent)
+	errs := make(chan *StreamFailure, 1)
+	go func() {
+		close(m.secondStarted)
+		<-ctx.Done()
+		close(events)
+		errs <- &StreamFailure{Message: ctx.Err().Error()}
+		close(errs)
+	}()
+	return ModelStream{Events: events, Err: errs}
 }
 
 func (m *codeCellApprovalModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
@@ -511,6 +536,79 @@ func TestApprovedNestedToolResumesItsCellWithoutReplayingProgram(t *testing.T) {
 		if item.Role == "tool" && item.CallID == approvalID {
 			t.Error("approved nested result leaked into agent history")
 		}
+	}
+}
+
+func TestCancellingTurnTerminatesYieldedCellsAndClearsCellApprovals(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := &yieldedCellThenWaitModel{secondStarted: make(chan struct{})}
+	session := &Session{
+		model: model,
+		cellPrograms: map[string]CellProgram{
+			"yield_forever": CellProgramFunc(func(context.Context, *CellContext) (CellResponse, error) {
+				return CellResponse{State: CellYielded, Content: "paused"}, nil
+			}),
+		},
+	}
+	done := make(chan *TurnContext, 1)
+	go func() { done <- session.runTurn(ctx) }()
+	<-model.secondStarted
+	cancel()
+	turn := <-done
+
+	if got, want := turn.cancellationErr, context.Canceled; got != want {
+		t.Fatalf("cancellation error = %v, want %v", got, want)
+	}
+	cell, ok := session.cells.Snapshot("cell_1")
+	if !ok || cell.State != CellCancelled {
+		t.Fatalf("cancelled cell = %#v, found=%t", cell, ok)
+	}
+	last := turn.history[len(turn.history)-1]
+	if got, want := last.Content, "Script terminated\nOutput:\nturn cancelled"; got != want {
+		t.Errorf("terminal cell output = %q, want %q", got, want)
+	}
+	if turn.needsFollowUp {
+		t.Error("cancelled turn requested a follow-up")
+	}
+}
+
+func TestCancellingTurnRemovesOnlyCellOwnedApprovals(t *testing.T) {
+	cells := NewCellManager()
+	future := cells.StartProgram(context.Background(), &ToolRegistry{}, "code_call", CellProgramFunc(func(context.Context, *CellContext) (CellResponse, error) {
+		return CellResponse{Approval: &CellApproval{
+			Request: ApprovalRequest{CallID: "nested_call", Tool: "echo", Reason: "needs approval"},
+			Resume: func(context.Context, ToolResult) (CellResponse, error) {
+				return CellResponse{State: CellCompleted}, nil
+			},
+		}}, nil
+	}))
+	pending := <-future.result
+	if pending.Approval == nil {
+		t.Fatal("cell did not suspend for approval")
+	}
+
+	session := &Session{cells: cells}
+	turn := &TurnContext{
+		pendingApprovals: []ApprovalRequest{
+			pending.Approval.Request,
+			{CallID: "direct_call", Tool: "echo", Reason: "direct approval"},
+		},
+		pendingCellApprovals: map[string]PendingCellApproval{
+			"nested_call": *pending.Approval,
+		},
+	}
+	session.cancelActiveCells(turn, "turn cancelled")
+
+	cell, ok := cells.Snapshot(pending.Approval.CellID)
+	if !ok || cell.State != CellCancelled {
+		t.Fatalf("cancelled cell = %#v, found=%t", cell, ok)
+	}
+	if len(turn.pendingCellApprovals) != 0 {
+		t.Fatalf("cell approvals = %#v, want none", turn.pendingCellApprovals)
+	}
+	if got, want := turn.pendingApprovals, []ApprovalRequest{{CallID: "direct_call", Tool: "echo", Reason: "direct approval"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("remaining approvals = %#v, want %#v", got, want)
 	}
 }
 
