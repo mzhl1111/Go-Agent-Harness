@@ -78,7 +78,7 @@ sequenceDiagram
         A->>H: CompleteToolCall(same invocation_id, result)
     else host cancels
         H->>A: ToolCallCancelled(invocation_id)
-        Note over A: remove pending call; never run executor
+        Note over A: remove pending call and do not run executor
     end
 ```
 
