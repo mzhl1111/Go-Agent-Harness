@@ -223,6 +223,11 @@ type codeCellApprovalModel struct {
 	responses int
 }
 
+type multiToolCodeCellModel struct {
+	inputs    [][]HistoryItem
+	responses int
+}
+
 type yieldedCellThenWaitModel struct {
 	responses     int
 	secondStarted chan struct{}
@@ -267,6 +272,17 @@ func (m *codeCellRecordingModel) Stream(ctx context.Context, input []HistoryItem
 		}})
 	}
 	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "cell result received"}})
+}
+
+func (m *multiToolCodeCellModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responses++
+	if m.responses == 1 {
+		return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{
+			Kind: "code_cell", CallID: "call_multi_tool_cell", CellProgram: "two_nested_calls",
+		}})
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "cell handled both calls"}})
 }
 
 func (m *flakyStreamModel) Stream(ctx context.Context, _ []HistoryItem) ModelStream {
@@ -489,6 +505,66 @@ func TestCompletedCodeCellRunsInsideTurnAndReturnsOneCellOutput(t *testing.T) {
 		}
 	}
 	if got, want := turn.history[len(turn.history)-1].Content, "cell result received"; got != want {
+		t.Errorf("final assistant output = %q, want %q", got, want)
+	}
+}
+
+func TestCodeCellCanIssueMultipleNestedToolCallsButReturnsOneCellOutput(t *testing.T) {
+	model := &multiToolCodeCellModel{}
+	executor := &countingExecutor{}
+	observer := &recordingObserver{}
+	session := &Session{
+		model: model,
+		tools: &ToolRegistry{
+			executors: map[string]ToolExecutor{"count": executor},
+			observer:  observer,
+		},
+		cellPrograms: map[string]CellProgram{
+			"two_nested_calls": CellProgramFunc(func(ctx context.Context, cell *CellContext) (CellResponse, error) {
+				first, err := cell.CallTool(ctx, "count", "first")
+				if err != nil {
+					return CellResponse{}, err
+				}
+				second, err := cell.CallTool(ctx, "count", "second")
+				if err != nil {
+					return CellResponse{}, err
+				}
+				return CellResponse{
+					State:   CellCompleted,
+					Content: "nested results: " + first.Result.Output + ", " + second.Result.Output,
+				}, nil
+			}),
+		},
+	}
+	turn := session.runTurn(context.Background())
+
+	if got, want := executor.calls, 2; got != want {
+		t.Fatalf("nested executor calls = %d, want %d", got, want)
+	}
+	var completed []DispatchEvent
+	for _, event := range observer.snapshot() {
+		if event.Kind == DispatchCompleted {
+			completed = append(completed, event)
+		}
+	}
+	if got, want := len(completed), 2; got != want {
+		t.Fatalf("completed nested dispatches = %d, want %d", got, want)
+	}
+	for index, event := range completed {
+		if got, want := event.Source, (ToolCallSource{Kind: ToolCallCodeMode, CellID: "cell_1", RuntimeToolCallID: "tool_" + strconv.Itoa(index+1)}); got != want {
+			t.Errorf("nested source %d = %#v, want %#v", index+1, got, want)
+		}
+	}
+	secondInput := model.inputs[1]
+	if got, want := secondInput[len(secondInput)-1], (HistoryItem{Role: "tool", CallID: "call_multi_tool_cell", Content: "Script completed\nOutput:\nnested results: first, second"}); got != want {
+		t.Errorf("cell output in second model input = %#v, want %#v", got, want)
+	}
+	for _, item := range secondInput {
+		if strings.HasPrefix(item.CallID, "cell_1_tool_") {
+			t.Errorf("nested result leaked into agent history: %#v", item)
+		}
+	}
+	if got, want := turn.history[len(turn.history)-1].Content, "cell handled both calls"; got != want {
 		t.Errorf("final assistant output = %q, want %q", got, want)
 	}
 }

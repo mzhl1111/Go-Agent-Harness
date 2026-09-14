@@ -95,7 +95,7 @@ For the shortest useful path, read these in order:
 3. [executor.go](executor.go): reusable executor contract versus harness orchestration.
 4. [stream.go](stream.go), [model.go](model.go), and [19-ordered-future-draining.md](docs/19-ordered-future-draining.md): streamed items and deterministic future draining.
 5. [cell.go](cell.go), then [25-code-cell-in-the-turn-loop.md](docs/25-code-cell-in-the-turn-loop.md): code cells re-entering the same turn loop.
-6. [28-codex-code-mode-host-boundary.md](docs/28-codex-code-mode-host-boundary.md) through [31-host-nested-cancellation.md](docs/31-host-nested-cancellation.md): the real host protocol boundary.
+6. [28-codex-code-mode-host-boundary.md](docs/28-codex-code-mode-host-boundary.md) through [32-multiple-nested-tool-calls.md](docs/32-multiple-nested-tool-calls.md): the host protocol boundary and cell-local multi-call behavior.
 
 The local, read-only upstream clone is at `reference/codex` (ignored by Git).
 The most relevant upstream contract is

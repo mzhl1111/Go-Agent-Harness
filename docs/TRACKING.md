@@ -104,3 +104,4 @@
 - [x] Separate host `invocation_id` from runtime tool-call identity in a host-facing nested-call adapter.
 - [x] Preserve a host-originated nested approval and complete that exact host invocation only after approval.
 - [x] Model host-side cancellation of a pending nested invocation without invoking its executor.
+- [x] Test multiple nested tool calls from one cell with distinct runtime IDs and one cell-level agent result.
