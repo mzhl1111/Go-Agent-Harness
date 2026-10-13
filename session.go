@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 )
 
@@ -26,16 +28,25 @@ type TurnContext struct {
 
 type StopHook func(*TurnContext)
 
+var (
+	ErrNoActiveTurn = errors.New("no active turn to steer")
+	ErrEmptySteer   = errors.New("steer input is empty")
+)
+
 type Session struct {
-	model        Model
-	tools        *ToolRegistry
-	stopHooks    []StopHook
-	initialInput string
-	toolTimeout  time.Duration
-	streamRetry  RetryPolicy
-	observer     TurnObserver
-	cells        *CellManager
-	cellPrograms map[string]CellProgram
+	model           Model
+	tools           *ToolRegistry
+	stopHooks       []StopHook
+	initialInput    string
+	toolTimeout     time.Duration
+	streamRetry     RetryPolicy
+	observer        TurnObserver
+	cells           *CellManager
+	cellPrograms    map[string]CellProgram
+	steerMu         sync.Mutex
+	activeSteerTurn *TurnContext
+	pendingSteers   []HistoryItem
+	steerSignal     chan struct{}
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
@@ -111,15 +122,22 @@ func (s *Session) runTurn(ctx context.Context) *TurnContext {
 		admittedToolCalls:     make(map[string]ToolCall),
 		pendingCellApprovals:  make(map[string]PendingCellApproval),
 	}
+	s.beginSteerTurn(turn)
+	defer s.endSteerTurn(turn)
 	return s.continueTurn(ctx, turn)
 }
 
 func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnContext {
 	for {
+		s.recordPendingSteers(turn)
 		pendingFutures, needsFollowUp, streamFailure, fatalError := s.streamResponse(ctx, turn)
 		turn.lastResponseHadToolCalls = len(pendingFutures) > 0
 		turn.needsFollowUp = turn.needsFollowUp || needsFollowUp
 		s.drainPendingFutures(turn, pendingFutures)
+		if s.recordPendingSteers(turn) {
+			turn.needsFollowUp = true
+			turn.followUpReason = "steered user input"
+		}
 		// The parent context owns this complete turn, including every future it
 		// started. We first drain those futures so their cancellation outcomes are
 		// recorded, then stop before asking the model for another response.
@@ -154,6 +172,66 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 		s.emit(TurnEvent{Kind: TurnCompleted})
 		return turn
 	}
+}
+
+// Steer appends user input to the active turn without cancelling its model
+// stream or ordinary tool futures. The turn records it before its next model
+// request. Waiting executors may opt in to the steer signal separately.
+func (s *Session) Steer(input string) error {
+	if input == "" {
+		return ErrEmptySteer
+	}
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	if s.activeSteerTurn == nil {
+		return ErrNoActiveTurn
+	}
+	s.pendingSteers = append(s.pendingSteers, HistoryItem{Role: "user", Content: input})
+	if s.steerSignal != nil {
+		close(s.steerSignal)
+	}
+	s.steerSignal = make(chan struct{})
+	return nil
+}
+
+func (s *Session) beginSteerTurn(turn *TurnContext) {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	s.activeSteerTurn = turn
+	s.pendingSteers = nil
+	s.steerSignal = make(chan struct{})
+}
+
+func (s *Session) endSteerTurn(turn *TurnContext) {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	if s.activeSteerTurn == turn {
+		s.activeSteerTurn = nil
+		s.pendingSteers = nil
+		s.steerSignal = nil
+	}
+}
+
+func (s *Session) recordPendingSteers(turn *TurnContext) bool {
+	s.steerMu.Lock()
+	if s.activeSteerTurn != turn || len(s.pendingSteers) == 0 {
+		s.steerMu.Unlock()
+		return false
+	}
+	pending := append([]HistoryItem(nil), s.pendingSteers...)
+	s.pendingSteers = nil
+	s.steerMu.Unlock()
+	turn.history = append(turn.history, pending...)
+	for _, input := range pending {
+		s.emit(TurnEvent{Kind: TurnSteered, Content: input.Content})
+	}
+	return true
+}
+
+func (s *Session) steerSignalForActiveTurn() <-chan struct{} {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	return s.steerSignal
 }
 
 func (s *Session) cancelActiveCells(turn *TurnContext, message string) {
@@ -407,7 +485,7 @@ func (s *Session) startTool(ctx context.Context, call ToolCall, approvalGranted 
 	if approvalGranted {
 		future = s.tools.StartAfterApproval(toolCtx, call)
 	} else {
-		future = s.tools.Start(toolCtx, call)
+		future = s.tools.StartWithSteer(toolCtx, call, s.steerSignalForActiveTurn())
 	}
 	future.cancel = cancel
 	return future

@@ -33,7 +33,7 @@ type ToolRegistry struct {
 	serialGates map[string]chan struct{}
 }
 
-func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall, approvalGranted bool) ToolDispatchOutcome {
+func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call ToolCall, approvalGranted bool, steer <-chan struct{}) ToolDispatchOutcome {
 	r.emit(DispatchEvent{Kind: DispatchStarted, CallID: call.ID, Tool: call.Name, Source: call.Source})
 	for _, hook := range r.pre {
 		switch outcome := hook(call); outcome.Decision {
@@ -61,7 +61,12 @@ func (r *ToolRegistry) dispatchAnyWithTerminalOutcome(ctx context.Context, call 
 		maxAttempts = 1
 	}
 	for attempt := 1; ; attempt++ {
-		result := executor.Handle(ctx, call.Input)
+		result := ToolResult{}
+		if steerAware, ok := executor.(SteerAwareToolExecutor); ok && steer != nil {
+			result = steerAware.HandleWithSteer(ctx, call.Input, steer)
+		} else {
+			result = executor.Handle(ctx, call.Input)
+		}
 		result.CallID, result.Source, result.Attempts = call.ID, call.Source, attempt
 		if !result.IsError || !result.Retryable || attempt == maxAttempts {
 			for _, hook := range r.post {
@@ -96,14 +101,20 @@ func (r *ToolRegistry) emit(event DispatchEvent) {
 }
 
 func (r *ToolRegistry) Start(ctx context.Context, call ToolCall) ToolFuture {
-	return r.start(ctx, call, false)
+	return r.start(ctx, call, false, nil)
 }
 
 func (r *ToolRegistry) StartAfterApproval(ctx context.Context, call ToolCall) ToolFuture {
-	return r.start(ctx, call, true)
+	return r.start(ctx, call, true, nil)
 }
 
-func (r *ToolRegistry) start(ctx context.Context, call ToolCall, approvalGranted bool) ToolFuture {
+// StartWithSteer lets cooperative waiting executors observe a new user steer.
+// It never cancels ordinary executor work.
+func (r *ToolRegistry) StartWithSteer(ctx context.Context, call ToolCall, steer <-chan struct{}) ToolFuture {
+	return r.start(ctx, call, false, steer)
+}
+
+func (r *ToolRegistry) start(ctx context.Context, call ToolCall, approvalGranted bool, steer <-chan struct{}) ToolFuture {
 	call.Source = call.Source.normalized()
 	result := make(chan ToolDispatchOutcome, 1)
 	go func() {
@@ -119,7 +130,7 @@ func (r *ToolRegistry) start(ctx context.Context, call ToolCall, approvalGranted
 				return
 			}
 		}
-		result <- r.dispatchAnyWithTerminalOutcome(ctx, call, approvalGranted)
+		result <- r.dispatchAnyWithTerminalOutcome(ctx, call, approvalGranted, steer)
 	}()
 	return ToolFuture{call: call, result: result}
 }

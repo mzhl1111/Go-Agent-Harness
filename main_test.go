@@ -48,6 +48,24 @@ type recordingHostCompletionSink struct {
 	completions chan HostToolCompletion
 }
 
+type steerWaitingExecutor struct {
+	started chan struct{}
+}
+
+func (e steerWaitingExecutor) Handle(_ context.Context, _ string) ToolResult {
+	return ToolResult{IsError: true, Output: "wait executor requires a steer signal"}
+}
+
+func (e steerWaitingExecutor) HandleWithSteer(ctx context.Context, _ string, steer <-chan struct{}) ToolResult {
+	close(e.started)
+	select {
+	case <-steer:
+		return ToolResult{Output: "wait interrupted by steer"}
+	case <-ctx.Done():
+		return ToolResult{IsError: true, Output: ctx.Err().Error()}
+	}
+}
+
 func (sink recordingHostCompletionSink) CompleteToolCall(_ context.Context, completion HostToolCompletion) error {
 	sink.completions <- completion
 	return nil
@@ -226,6 +244,50 @@ type codeCellApprovalModel struct {
 type multiToolCodeCellModel struct {
 	inputs    [][]HistoryItem
 	responses int
+}
+
+type steerRecordingModel struct {
+	inputs       [][]HistoryItem
+	responses    int
+	firstStarted chan struct{}
+	releaseFirst <-chan struct{}
+}
+
+func (m *steerRecordingModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responses++
+	if m.responses == 1 {
+		events := make(chan ModelEvent)
+		errs := make(chan *StreamFailure, 1)
+		go func() {
+			defer close(events)
+			defer close(errs)
+			close(m.firstStarted)
+			select {
+			case <-m.releaseFirst:
+				events <- ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "first response"}}
+				errs <- nil
+			case <-ctx.Done():
+				errs <- &StreamFailure{Message: ctx.Err().Error()}
+			}
+		}()
+		return ModelStream{Events: events, Err: errs}
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "steer received"}})
+}
+
+type steerWaitModel struct {
+	inputs    [][]HistoryItem
+	responses int
+}
+
+func (m *steerWaitModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responses++
+	if m.responses == 1 {
+		return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "tool_call", Tool: "wait", CallID: "wait_1"}})
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "wait completed after steer"}})
 }
 
 type yieldedCellThenWaitModel struct {
@@ -566,6 +628,65 @@ func TestCodeCellCanIssueMultipleNestedToolCallsButReturnsOneCellOutput(t *testi
 	}
 	if got, want := turn.history[len(turn.history)-1].Content, "cell handled both calls"; got != want {
 		t.Errorf("final assistant output = %q, want %q", got, want)
+	}
+}
+
+func TestSteerQueuesInputWithoutCancellingCurrentModelStream(t *testing.T) {
+	release := make(chan struct{})
+	model := &steerRecordingModel{firstStarted: make(chan struct{}), releaseFirst: release}
+	session := &Session{model: model, initialInput: "original request"}
+	done := make(chan *TurnContext, 1)
+	go func() { done <- session.runTurn(context.Background()) }()
+	<-model.firstStarted
+	if err := session.Steer("focus on tests"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	if got, want := model.responses, 1; got != want {
+		t.Fatalf("model responses before stream release = %d, want %d", got, want)
+	}
+	close(release)
+	turn := <-done
+	if got, want := model.responses, 2; got != want {
+		t.Fatalf("model responses = %d, want %d", got, want)
+	}
+	if got, want := model.inputs[1], []HistoryItem{
+		{Role: "user", Content: "original request"},
+		{Role: "assistant", Content: "first response"},
+		{Role: "user", Content: "focus on tests"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("second model input = %#v, want %#v", got, want)
+	}
+	if got, want := turn.history[len(turn.history)-1].Content, "steer received"; got != want {
+		t.Errorf("final assistant output = %q, want %q", got, want)
+	}
+}
+
+func TestSteerAwareWaitingExecutorWakesWithoutCancellingTheTurn(t *testing.T) {
+	model := &steerWaitModel{}
+	executor := steerWaitingExecutor{started: make(chan struct{})}
+	session := &Session{
+		model:        model,
+		initialInput: "wait for updates",
+		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"wait": executor}},
+	}
+	done := make(chan *TurnContext, 1)
+	go func() { done <- session.runTurn(context.Background()) }()
+	<-executor.started
+	if err := session.Steer("change direction"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	turn := <-done
+	if got, want := model.responses, 2; got != want {
+		t.Fatalf("model responses = %d, want %d", got, want)
+	}
+	if got, want := model.inputs[1][len(model.inputs[1])-2:], []HistoryItem{
+		{Role: "tool", CallID: "wait_1", Content: "wait interrupted by s..."},
+		{Role: "user", Content: "change direction"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("follow-up input tail = %#v, want %#v", got, want)
+	}
+	if turn.cancellationErr != nil {
+		t.Errorf("turn was cancelled: %v", turn.cancellationErr)
 	}
 }
 

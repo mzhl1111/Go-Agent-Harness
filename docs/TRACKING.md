@@ -90,6 +90,13 @@
 - [x] Ignore byte-for-byte duplicate delivery without rerunning its executor.
 - [x] Treat reuse of a call ID with changed tool contents as fatal.
 
+## Current milestone: 12 — steering versus interruption
+
+- [x] Add an active-turn steer queue that does not cancel model or tool work.
+- [x] Record queued steer input in history before the next model request.
+- [x] Let waiting executors opt in to cooperative early wake-up on steer.
+- [x] Test both ordinary completion and cooperative wait behavior.
+
 ## Planned milestone: 11 — code mode (after direct-runtime foundations)
 
 - [x] Add explicit direct-call provenance to the direct harness as the base for nested cell calls.

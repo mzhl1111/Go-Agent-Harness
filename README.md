@@ -47,6 +47,7 @@ policy as direct calls.
 | Parallelism | Tool futures may execute concurrently; history drains in original model-item order. |
 | Approval | Approval is a terminal dispatch outcome; direct calls and nested cells resume their exact continuation without replaying model output. |
 | Cancellation | A cancelled turn drains started work, never samples again, and terminates its active cells. |
+| Steering | Queues new user input for the next sampling pass without cancelling current work; waiting executors may opt into an early wake-up signal. |
 | Observability | `TurnObserver` projects runtime events without polluting model history. |
 | Code mode | In-process persistent cells with yield/wait/completion; provenance for direct versus nested calls. |
 | Host boundary | A host-facing adapter separates host `invocation_id` from runtime IDs, completes the original callback after approval, and rejects cancelled nested calls. |
@@ -96,6 +97,7 @@ For the shortest useful path, read these in order:
 4. [stream.go](stream.go), [model.go](model.go), and [19-ordered-future-draining.md](docs/19-ordered-future-draining.md): streamed items and deterministic future draining.
 5. [cell.go](cell.go), then [25-code-cell-in-the-turn-loop.md](docs/25-code-cell-in-the-turn-loop.md): code cells re-entering the same turn loop.
 6. [28-codex-code-mode-host-boundary.md](docs/28-codex-code-mode-host-boundary.md) through [32-multiple-nested-tool-calls.md](docs/32-multiple-nested-tool-calls.md): the host protocol boundary and cell-local multi-call behavior.
+7. [33-steer-is-not-cancellation.md](docs/33-steer-is-not-cancellation.md): pending input, cooperative wake-up, and the difference between steer and interrupt.
 
 The local, read-only upstream clone is at `reference/codex` (ignored by Git).
 The most relevant upstream contract is

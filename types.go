@@ -81,6 +81,15 @@ type ToolExecutor interface {
 	Handle(context.Context, string) ToolResult
 }
 
+// SteerAwareToolExecutor is an opt-in contract for work whose useful waiting
+// condition ends when the user steers the active turn. Ordinary executors do
+// not receive this signal and therefore continue until completion or explicit
+// parent-context cancellation.
+type SteerAwareToolExecutor interface {
+	ToolExecutor
+	HandleWithSteer(context.Context, string, <-chan struct{}) ToolResult
+}
+
 // ParallelToolExecutor is an opt-in capability. Executors that do not
 // implement it are serialized by tool name.
 type ParallelToolExecutor interface {
@@ -185,6 +194,7 @@ const (
 	TurnFatal          TurnEventKind = "fatal"
 	TurnDuplicateTool  TurnEventKind = "duplicate_tool_ignored"
 	TurnCellOutput     TurnEventKind = "cell_output"
+	TurnSteered        TurnEventKind = "steered"
 	TurnCompleted      TurnEventKind = "completed"
 )
 
