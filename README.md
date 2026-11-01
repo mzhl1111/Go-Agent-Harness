@@ -48,6 +48,7 @@ policy as direct calls.
 | Approval | Approval is a terminal dispatch outcome; direct calls and nested cells resume their exact continuation without replaying model output. |
 | Cancellation | A cancelled turn drains started work, never samples again, and terminates its active cells. |
 | Steering | Queues new user input for the next sampling pass without cancelling current work; waiting executors may opt into an early wake-up signal. |
+| Context compaction | Before a required follow-up, a separate compactor turns old history into retained user context plus a checkpoint summary. |
 | Observability | `TurnObserver` projects runtime events without polluting model history. |
 | Code mode | In-process persistent cells with yield/wait/completion; provenance for direct versus nested calls. |
 | Host boundary | A host-facing adapter separates host `invocation_id` from runtime IDs, completes the original callback after approval, and rejects cancelled nested calls. |
@@ -98,6 +99,7 @@ For the shortest useful path, read these in order:
 5. [cell.go](cell.go), then [25-code-cell-in-the-turn-loop.md](docs/25-code-cell-in-the-turn-loop.md): code cells re-entering the same turn loop.
 6. [28-codex-code-mode-host-boundary.md](docs/28-codex-code-mode-host-boundary.md) through [32-multiple-nested-tool-calls.md](docs/32-multiple-nested-tool-calls.md): the host protocol boundary and cell-local multi-call behavior.
 7. [33-steer-is-not-cancellation.md](docs/33-steer-is-not-cancellation.md): pending input, cooperative wake-up, and the difference between steer and interrupt.
+8. [34-context-compaction.md](docs/34-context-compaction.md): checkpoint summaries, replacement history, and the stop-hook boundary.
 
 The local, read-only upstream clone is at `reference/codex` (ignored by Git).
 The most relevant upstream contract is
@@ -108,8 +110,10 @@ The most relevant upstream contract is
 This is a learning model, not a production agent platform. It does not yet
 include a JavaScript runtime, generated gRPC client, reconnect/completion retry,
 or cancellation of an executor that is already running on behalf of a remote
-host. Those are good future exercises precisely because the boundaries above
-now make them isolated additions rather than turn-loop rewrites.
+host. Context compaction likewise uses item-count thresholds and an injected
+compactor instead of a real tokenizer and model request. Those are good future
+exercises precisely because the boundaries above now make them isolated
+additions rather than turn-loop rewrites.
 
 For the detailed, checkbox-level learning record, see
 [docs/TRACKING.md](docs/TRACKING.md). Each behavior change has a corresponding

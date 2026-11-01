@@ -24,6 +24,7 @@ type TurnContext struct {
 	streamFailure            *StreamFailure
 	fatalError               *ItemError
 	cancellationErr          error
+	compactionCount          int
 }
 
 type StopHook func(*TurnContext)
@@ -34,19 +35,21 @@ var (
 )
 
 type Session struct {
-	model           Model
-	tools           *ToolRegistry
-	stopHooks       []StopHook
-	initialInput    string
-	toolTimeout     time.Duration
-	streamRetry     RetryPolicy
-	observer        TurnObserver
-	cells           *CellManager
-	cellPrograms    map[string]CellProgram
-	steerMu         sync.Mutex
-	activeSteerTurn *TurnContext
-	pendingSteers   []HistoryItem
-	steerSignal     chan struct{}
+	model            Model
+	tools            *ToolRegistry
+	stopHooks        []StopHook
+	initialInput     string
+	toolTimeout      time.Duration
+	streamRetry      RetryPolicy
+	observer         TurnObserver
+	cells            *CellManager
+	cellPrograms     map[string]CellProgram
+	compactor        ContextCompactor
+	compactionPolicy CompactionPolicy
+	steerMu          sync.Mutex
+	activeSteerTurn  *TurnContext
+	pendingSteers    []HistoryItem
+	steerSignal      chan struct{}
 }
 
 func (s *Session) handleOutputItemDone(ctx context.Context, turn *TurnContext, item ResponseItem) OutputItemResult {
@@ -157,12 +160,24 @@ func (s *Session) continueTurn(ctx context.Context, turn *TurnContext) *TurnCont
 			s.emit(TurnEvent{Kind: TurnFatal, Message: fatalError.Message})
 			return turn
 		}
-		for _, hook := range s.stopHooks {
-			hook(turn)
-		}
 		if len(turn.pendingApprovals) > 0 {
 			turn.needsFollowUp = false // Approval resume itself will request the next model response.
 			return turn                // The UI can now render approval requests and wait for a user decision.
+		}
+		if turn.needsFollowUp {
+			if err := s.maybeCompact(ctx, turn); err != nil {
+				turn.fatalError = &ItemError{Kind: ItemFatal, Message: err.Error()}
+				s.emit(TurnEvent{Kind: TurnFatal, Message: err.Error()})
+				return turn
+			}
+			s.emit(TurnEvent{Kind: TurnFollowUp, Message: turn.followUpReason})
+			turn.needsFollowUp = false
+			continue
+		}
+		// Match Codex's boundary: stop hooks run only after there is no model,
+		// tool, or queued-input reason to re-enter the turn loop.
+		for _, hook := range s.stopHooks {
+			hook(turn)
 		}
 		if turn.needsFollowUp {
 			s.emit(TurnEvent{Kind: TurnFollowUp, Message: turn.followUpReason})

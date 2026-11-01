@@ -183,19 +183,20 @@ type TurnEvent struct {
 type TurnEventKind string
 
 const (
-	TurnTextDelta      TurnEventKind = "text_delta"
-	TurnToolInputDelta TurnEventKind = "tool_input_delta"
-	TurnItemCompleted  TurnEventKind = "item_completed"
-	TurnToolResult     TurnEventKind = "tool_result"
-	TurnApprovalNeeded TurnEventKind = "approval_needed"
-	TurnFollowUp       TurnEventKind = "follow_up"
-	TurnCancelled      TurnEventKind = "cancelled"
-	TurnStreamFailed   TurnEventKind = "stream_failed"
-	TurnFatal          TurnEventKind = "fatal"
-	TurnDuplicateTool  TurnEventKind = "duplicate_tool_ignored"
-	TurnCellOutput     TurnEventKind = "cell_output"
-	TurnSteered        TurnEventKind = "steered"
-	TurnCompleted      TurnEventKind = "completed"
+	TurnTextDelta        TurnEventKind = "text_delta"
+	TurnToolInputDelta   TurnEventKind = "tool_input_delta"
+	TurnItemCompleted    TurnEventKind = "item_completed"
+	TurnToolResult       TurnEventKind = "tool_result"
+	TurnApprovalNeeded   TurnEventKind = "approval_needed"
+	TurnFollowUp         TurnEventKind = "follow_up"
+	TurnCancelled        TurnEventKind = "cancelled"
+	TurnStreamFailed     TurnEventKind = "stream_failed"
+	TurnFatal            TurnEventKind = "fatal"
+	TurnDuplicateTool    TurnEventKind = "duplicate_tool_ignored"
+	TurnCellOutput       TurnEventKind = "cell_output"
+	TurnSteered          TurnEventKind = "steered"
+	TurnContextCompacted TurnEventKind = "context_compacted"
+	TurnCompleted        TurnEventKind = "completed"
 )
 
 // TurnObserver receives events from the session goroutine in turn order.

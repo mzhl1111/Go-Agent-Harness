@@ -281,6 +281,32 @@ type steerWaitModel struct {
 	responses int
 }
 
+type compactionRecordingModel struct {
+	inputs    [][]HistoryItem
+	responses int
+}
+
+func (m *compactionRecordingModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
+	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
+	m.responses++
+	if m.responses == 1 {
+		return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{
+			Kind: "tool_call", Tool: "count", Input: "inspect repository", CallID: "compact_call",
+		}})
+	}
+	return modelEventStream(ctx, ModelEvent{Kind: ModelOutputItemDone, Item: ResponseItem{Kind: "text", Text: "continued from checkpoint"}})
+}
+
+type recordingCompactor struct {
+	requests []CompactionRequest
+	summary  string
+}
+
+func (c *recordingCompactor) Compact(_ context.Context, request CompactionRequest) (string, error) {
+	c.requests = append(c.requests, request)
+	return c.summary, nil
+}
+
 func (m *steerWaitModel) Stream(ctx context.Context, input []HistoryItem) ModelStream {
 	m.inputs = append(m.inputs, append([]HistoryItem(nil), input...))
 	m.responses++
@@ -687,6 +713,64 @@ func TestSteerAwareWaitingExecutorWakesWithoutCancellingTheTurn(t *testing.T) {
 	}
 	if turn.cancellationErr != nil {
 		t.Errorf("turn was cancelled: %v", turn.cancellationErr)
+	}
+}
+
+func TestFollowUpCompactsHistoryBeforeItsNextModelRequest(t *testing.T) {
+	model := &compactionRecordingModel{}
+	compactor := &recordingCompactor{summary: "Progress: inspected repository. Next: answer the user."}
+	observer := &recordingTurnObserver{}
+	session := &Session{
+		model:        model,
+		initialInput: "inspect the repository",
+		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"count": &countingExecutor{}}},
+		compactor:    compactor,
+		compactionPolicy: CompactionPolicy{
+			MaxHistoryItems:       2,
+			RetainLatestUserItems: 1,
+		},
+		observer: observer,
+	}
+	turn := session.runTurn(context.Background())
+
+	if got, want := len(compactor.requests), 1; got != want {
+		t.Fatalf("compactor requests = %d, want %d", got, want)
+	}
+	request := compactor.requests[0]
+	if !strings.Contains(request.Prompt, "Create a handoff summary for another LLM") {
+		t.Errorf("compaction prompt lost the handoff instruction: %q", request.Prompt)
+	}
+	if got, want := len(request.History), 3; got != want {
+		t.Errorf("pre-compaction history items = %d, want %d", got, want)
+	}
+	if got, want := model.inputs[1], []HistoryItem{
+		{Role: "user", Content: "inspect the repository"},
+		{Role: "user", Content: compactionSummaryPrefix + "\nProgress: inspected repository. Next: answer the user."},
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("post-compaction model input = %#v, want %#v", got, want)
+	}
+	if got, want := turn.compactionCount, 1; got != want {
+		t.Errorf("compaction count = %d, want %d", got, want)
+	}
+	if got, want := observer.contents(TurnContextCompacted), []string{"Progress: inspected repository. Next: answer the user."}; !reflect.DeepEqual(got, want) {
+		t.Errorf("compaction events = %#v, want %#v", got, want)
+	}
+}
+
+func TestStopHooksRunOnlyAfterTheFinalSamplingBoundary(t *testing.T) {
+	model := &compactionRecordingModel{}
+	stopRuns := 0
+	session := &Session{
+		model:        model,
+		initialInput: "inspect the repository",
+		tools:        &ToolRegistry{executors: map[string]ToolExecutor{"count": &countingExecutor{}}},
+		stopHooks: []StopHook{func(*TurnContext) {
+			stopRuns++
+		}},
+	}
+	session.runTurn(context.Background())
+	if got, want := stopRuns, 1; got != want {
+		t.Errorf("stop hook runs = %d, want %d after the final model response only", got, want)
 	}
 }
 

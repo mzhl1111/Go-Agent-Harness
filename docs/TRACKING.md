@@ -97,6 +97,14 @@
 - [x] Let waiting executors opt in to cooperative early wake-up on steer.
 - [x] Test both ordinary completion and cooperative wait behavior.
 
+## Current milestone: 13 — context compaction
+
+- [x] Identify the upstream compaction prompt, independent compact request, and replacement-history boundary.
+- [x] Add a separate `ContextCompactor` contract with a concise handoff prompt.
+- [x] Compact only before a required follow-up request, preserving recent user context plus a checkpoint summary.
+- [x] Emit and test the context-compaction lifecycle event.
+- [x] Run stop hooks only after the turn has no follow-up reason.
+
 ## Planned milestone: 11 — code mode (after direct-runtime foundations)
 
 - [x] Add explicit direct-call provenance to the direct harness as the base for nested cell calls.
